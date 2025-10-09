@@ -63,17 +63,17 @@ app.use(contextMiddleware)
 app.use(authMiddleware)
 
 // ---------------- Rutas ----------------
-app.use(healthRoutes)                    // /health/liveness, /health/readiness
-app.use('/auth', authRoutes)             // /auth/login
-app.use('/usuarios', usuariosRoutes)     // /usuarios, /usuarios/me, etc.
-app.use('/incendios', incendiosRoutes)   // /incendios/*
-app.use('/reportes', reportesRoutes)     // /reportes/*
-app.use('/catalogos', catalogosRoutes)   // /catalogos/*
-app.use('/roles', rolesRoutes)           // /roles/*
-app.use('/firms', firmsRoutes) ///firms/run, /firms/schedule, etc.
-app.use('/instituciones', institucionesRoutes) // /instituciones/*
-app.use('/puntos-calor',puntosCalorRoutes),
-app.use(estadosIncendioRoutes)           // expone /estados_incendio, etc. (SIN prefijo)
+app.use(healthRoutes)                         // /health/liveness, /health/readiness
+app.use('/auth', authRoutes)                  // /auth/login
+app.use('/usuarios', usuariosRoutes)          // /usuarios, /usuarios/me, etc.
+app.use('/incendios', incendiosRoutes)        // /incendios/*
+app.use('/reportes', reportesRoutes)          // /reportes/*
+app.use('/catalogos', catalogosRoutes)        // /catalogos/*
+app.use('/roles', rolesRoutes)                // /roles/*
+app.use('/api/firms', firmsRoutes)            // /api/firms/run, /api/firms/puntos, etc.
+app.use('/instituciones', institucionesRoutes)// /instituciones/*
+app.use('/puntos-calor', puntosCalorRoutes)   // /puntos-calor/*
+app.use(estadosIncendioRoutes)                // /estados_incendio, etc. (SIN prefijo)
 
 // Ruta de prueba
 app.get('/test-auth', (_req, res) => {

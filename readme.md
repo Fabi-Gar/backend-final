@@ -1,6 +1,28 @@
 Backend Incendios · README
 Visión general
 
+
+
+
+
+
+Recrea todas las imágenes definidas en docker-compose.dev.yml
+
+docker compose -f docker-compose.dev.yml up -d --build
+
+solo api
+
+docker compose -f docker-compose.dev.yml build api
+docker compose -f docker-compose.dev.yml up -d api
+
+
+
+Limpiar y iniciar
+
+docker compose -f docker-compose.dev.yml build --no-cache api
+docker compose -f docker-compose.dev.yml up -d api
+
+
 API en Node 20 + Express + TypeORM (PostgreSQL), con Docker para desarrollo y despliegue. Incluye seguridad base (Helmet, CORS, rate limit), logs con Pino y healthchecks.
 
 Requisitos
