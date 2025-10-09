@@ -1,3 +1,4 @@
+// src/modules/firms/entities/punto-calor.entity.ts (tu archivo)
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm'
 import { Incendio } from '../../incendios/entities/incendio.entity'
 
@@ -11,10 +12,10 @@ export class PuntoCalor {
   fuente!: string
 
   @Column({ type: 'text' })
-  instrument!: string // VIIRS | MODIS
+  instrument!: string
 
   @Column({ type: 'text' })
-  satellite!: string // NPP | NOAA20 | TERRA | AQUA
+  satellite!: string
 
   @Column({ type: 'text', nullable: true })
   version!: string | null
@@ -23,10 +24,10 @@ export class PuntoCalor {
   acq_date!: string
 
   @Column({ type: 'int' })
-  acq_time!: number // HHmm UTC
+  acq_time!: number
 
   @Column({ type: 'text', nullable: true })
-  daynight!: string | null // D | N
+  daynight!: string | null
 
   @Column({ type: 'numeric', nullable: true })
   confidence!: string | null
@@ -54,6 +55,9 @@ export class PuntoCalor {
 
   @Column({ type: 'text', nullable: true })
   region!: string | null
+
+  @Column({ type: 'text', nullable: true })
+  hash_dedupe!: string | null
 
   @ManyToOne(() => Incendio, { nullable: true })
   @JoinColumn({ name: 'incendio_uuid', referencedColumnName: 'incendio_uuid', foreignKeyConstraintName: 'fk_puntos_calor_incendio_uuid' })

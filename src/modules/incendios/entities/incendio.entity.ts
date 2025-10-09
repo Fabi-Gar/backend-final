@@ -1,6 +1,7 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm'
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, ManyToOne, JoinColumn, Index, OneToOne } from 'typeorm'
 import { Usuario } from '../../seguridad/entities/usuario.entity'
 import { EstadoIncendio } from '../../catalogos/entities/estado-incendio.entity'
+import { InfoFalsaIncendio } from '../../responsable/entities/info-falsa-incendio.entity'
 
 @Index('idx_incendios_estado_aprobado', ['estado_incendio', 'aprobado'])
 @Entity('incendios')
@@ -47,6 +48,9 @@ export class Incendio {
   @ManyToOne(() => EstadoIncendio, { nullable: false })
   @JoinColumn({ name: 'estado_incendio_uuid', referencedColumnName: 'estado_incendio_uuid', foreignKeyConstraintName: 'fk_incendios_estado' })
   estado_incendio!: EstadoIncendio
+
+  @OneToOne(() => InfoFalsaIncendio, (f) => f.incendio)
+  info_falsa?: InfoFalsaIncendio | null
 
   @CreateDateColumn({ type: 'timestamptz', name: 'creado_en', default: () => 'now()' })
   creado_en!: Date

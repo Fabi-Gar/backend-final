@@ -13,6 +13,11 @@ PostgreSQL (en Docker o externo)
 
 (Opcional) Redis
 
+Ejecucion de seed dentro de docker
+
+docker compose -f docker-compose.dev.yml exec api node dist/db/seeds/171004_seed_inicial.js
+
+
 Configuración de entorno
 
 Crea un .env con variables clave:

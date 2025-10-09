@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        NODE_ENV: production   # <- omite devDeps en deps/prune
     ports:
       - "4000:4000"
     environment:
@@ -17,3 +19,4 @@ services:
       DB_SSL: "true"
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
+    restart: unless-stopped

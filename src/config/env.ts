@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import dotenv from 'dotenv'
-import * as dotenvExpand from 'dotenv-expand'
+import dotenvExpand from 'dotenv-expand'
 
 dotenvExpand.expand(dotenv.config())
 
@@ -37,17 +37,23 @@ const schema = z.object({
 
   STORAGE_BUCKET_BASE_URL: z.string().url().optional(),
 
+  FIRMS_ENABLED: z.coerce.boolean().default(true),
   FIRMS_API_KEY: z.string().min(1),
-  FIRMS_COUNTRY: z.string().min(1).default('GTM'),
-  FIRMS_PRODUCTS: z.string().min(1).default('VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT,MODIS_NRT'),
+  FIRMS_COUNTRY: z.string().min(2).default('GTM'),
+  FIRMS_PRODUCTS: z.string().default('VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT,MODIS_NRT')
+    .transform(s => s.split(',').map(x => x.trim()).filter(Boolean)),
   FIRMS_DAYS: z.coerce.number().int().positive().default(3),
-  FIRMS_BBOX_GTM: z.string().min(1),
+  FIRMS_BBOX_GTM: z.string().default(''),
   FIRMS_USE_AREA_FALLBACK: z.coerce.boolean().default(true),
-  FIRMS_FETCH_CRON: z.string().min(1).default('0 */2 * * *'),
-  FIRMS_BUFFER_KM: z.coerce.number().int().positive().default(25),
-  FIRMS_TIME_WINDOW_H: z.coerce.number().int().positive().default(48),
+  FIRMS_FETCH_CRON: z.string().default('0 */2 * * *'),
 
-  REDIS_URL: z.string().optional(),
+  FIRMS_BUFFER_KM: z.coerce.number().positive().default(25),
+  FIRMS_TIME_WINDOW_H: z.coerce.number().int().positive().default(48),
+  FIRMS_BATCH_SIZE: z.coerce.number().int().positive().default(2000),
+
+  REDIS_URL: z.string().default('redis://localhost:6379'),
+  QUEUE_PREFIX: z.string().default('incendios'),
+  SSE_HEARTBEAT_MS: z.coerce.number().int().positive().default(15000),
 
   HEALTHCHECK_PATH: z.string().min(1).default('/health/liveness'),
   HEALTHCHECK_INTERVAL: z.string().min(1).default('30s'),

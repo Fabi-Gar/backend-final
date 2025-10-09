@@ -31,6 +31,11 @@ router.post('/login', async (req, res, next) => {
     // Token MVP = usuario_uuid (tu authMiddleware ya lo soporta como Bearer)
     const token = user.usuario_uuid
 
+    await AppDataSource.getRepository(Usuario).update(
+    { usuario_uuid: user.usuario_uuid },
+    { ultimo_login: new Date() }
+    )
+
     res.json({
       token,
       user: {
