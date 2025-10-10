@@ -1,25 +1,22 @@
 #!/bin/sh
 set -eu
 
-# Defaults por si faltan vars
 DB_HOST="${DB_HOST:-db}"
 DB_PORT="${DB_PORT:-5432}"
 
-echo "⏳ Esperando a DB en $DB_HOST:$DB_PORT..."
-# Requiere netcat dentro de la imagen
+echo "⏳ Esperando DB en $DB_HOST:$DB_PORT…"
 until nc -z "$DB_HOST" "$DB_PORT"; do
   sleep 2
 done
 echo "✅ DB lista"
 
-echo "📦 Ejecutando migraciones..."
-# Usa el script correcto según cómo inicias la API en el contenedor:
-# - Si corres compilado (node dist/server.js) -> migration:run:dist
-# - Si corres TS (ts-node/tsx) -> migration:run
+echo "📦 Ejecutando migraciones (dist)…"
 npm run migration:run:dist || {
-  echo "❌ Error al ejecutar migraciones"
-  exit 1
+  echo "❌ Error al ejecutar migraciones"; exit 1;
 }
 
-echo "🚀 Iniciando API..."
+echo "🌱 Ejecutando seeds (dist, idempotentes)…"
+npm run seed:dist || echo "⚠️ Seeds retornaron error (posible repetición) — continuando…"
+
+echo "🚀 Iniciando API…"
 npm run start

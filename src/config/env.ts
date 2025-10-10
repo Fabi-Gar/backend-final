@@ -27,7 +27,7 @@ const schema = z.object({
 
   JWT_SECRET: z.string().min(1),
   JWT_ISSUER: z.string().min(1).default('app-incendios'),
-  JWT_AUDIENCE: z.string().min(1).default('app-users'),
+  JWT_AUDIENCE: z.string().min(1).default('usuarios-app'), 
   JWT_EXPIRES_IN: z.string().min(1).default('2h'),
 
   CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),

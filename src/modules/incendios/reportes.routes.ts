@@ -8,6 +8,7 @@ import { assertCanReport } from '../incendios/incendios.permissions'
 import { Reporte } from './entities/reporte.entity'
 import { FotoReporte } from './entities/foto-reporte.entity'
 import { IsNull } from 'typeorm'
+import { auditRecord } from '../auditoria/auditoria.service'
 
 const router = Router()
 
@@ -69,9 +70,71 @@ router.post('/', guardAuth, async (req, res, next) => {
     } as any)
 
     await repo.save(r)
+
+    // ---- Feed: nuevo reporte (si está asociado a un incendio)
+    if (parsed.incendio_uuid) {
+      await AppDataSource.query(
+        `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
+         VALUES ($1, 'NUEVO_REPORTE', 'Nuevo reporte registrado', $2)`,
+        [parsed.incendio_uuid, res.locals.ctx.user.usuario_uuid ?? null]
+      )
+    }
+
+    // ---- Centroide desde primer reporte + feed + auditoría
+    if (parsed.incendio_uuid) {
+      const prev = await AppDataSource.query(
+        `SELECT centroide
+           FROM incendios
+          WHERE incendio_uuid = $1
+            AND eliminado_en IS NULL`,
+        [parsed.incendio_uuid]
+      )
+      const antes = prev?.[0]?.centroide ?? null
+
+      if (!antes) {
+        const upd = await AppDataSource.query(
+          `UPDATE incendios
+              SET centroide = $2::jsonb,
+                  actualizado_en = now()
+            WHERE incendio_uuid = $1
+              AND eliminado_en IS NULL
+              AND (centroide IS NULL)
+          RETURNING incendio_uuid, centroide`,
+          [parsed.incendio_uuid, JSON.stringify(parsed.ubicacion)]
+        )
+
+        if (upd?.length) {
+          await auditRecord({
+            tabla: 'incendios',
+            registro_uuid: parsed.incendio_uuid,
+            accion: 'UPDATE',
+            antes: { centroide: null },
+            despues: { centroide: parsed.ubicacion },
+            ctx: res.locals.ctx
+          })
+          await AppDataSource.query(
+            `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
+             VALUES ($1, 'CIERRE_ACTUALIZADO', 'Centroide establecido desde primer reporte', $2)`,
+            [parsed.incendio_uuid, res.locals.ctx.user.usuario_uuid ?? null]
+          )
+        }
+      }
+    }
+
     res.status(201).json(r)
   } catch (err: any) {
-    if (err?.issues) return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'Validación', issues: err.issues }, requestId: res.locals.ctx?.requestId })
+    if (err?.issues) {
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: 'Validación', issues: err.issues },
+        requestId: res.locals.ctx?.requestId
+      })
+    }
+    if (err?.status) {
+      return res.status(err.status).json({
+        error: { code: err.code || 'ERROR', message: err.message },
+        requestId: res.locals.ctx?.requestId
+      })
+    }
     next(err)
   }
 })
@@ -137,15 +200,46 @@ router.post('/:reporte_uuid/fotos', guardAuth, async (req, res, next) => {
 
     // existe el reporte?
     const repRepo = AppDataSource.getRepository(Reporte)
-    const rep = await repRepo.findOne({ where: { reporte_uuid: req.params.reporte_uuid, eliminado_en: IsNull() } })
+    const rep = await repRepo.findOne({
+      where: { reporte_uuid: req.params.reporte_uuid, eliminado_en: IsNull() },
+      relations: ['incendio']
+    })
     if (!rep) return res.status(404).json({ code: 'NOT_FOUND', message: 'Reporte no encontrado' })
 
     const repo = AppDataSource.getRepository(FotoReporte)
-    const f = repo.create({ url, credito: credito ?? null, reporte: { reporte_uuid: req.params.reporte_uuid } as any })
+    const f = repo.create({
+      url,
+      credito: credito ?? null,
+      reporte: { reporte_uuid: req.params.reporte_uuid } as any
+    })
     await repo.save(f)
+
+    // Auditoría foto
+    await auditRecord({
+      tabla: 'fotos_reportes',
+      registro_uuid: (f as any).foto_reporte_uuid,
+      accion: 'INSERT',
+      despues: { reporte_uuid: req.params.reporte_uuid, url, credito: credito ?? null },
+      ctx: res.locals.ctx
+    })
+
+    // Feed para el incendio (si aplica)
+    if (rep.incendio?.incendio_uuid) {
+      await AppDataSource.query(
+        `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
+         VALUES ($1, 'NUEVA_FOTO', 'Se añadió una foto al reporte', $2)`,
+        [rep.incendio.incendio_uuid, res.locals.ctx.user.usuario_uuid ?? null]
+      )
+    }
+
     res.status(201).json(f)
   } catch (err: any) {
-    if (err?.issues) return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'Validación', issues: err.issues }, requestId: res.locals.ctx?.requestId })
+    if (err?.issues) {
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: 'Validación', issues: err.issues },
+        requestId: res.locals.ctx?.requestId
+      })
+    }
     next(err)
   }
 })
