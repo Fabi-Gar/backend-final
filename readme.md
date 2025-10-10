@@ -1,8 +1,11 @@
 Backend Incendios · README
 Visión general
 
+docker compose up -d --build
+docker compose ps
+curl http://localhost:4000/health/liveness
 
-
+docker compose -f docker-compose.prod.yml up -d --force-recreate
 
 
 

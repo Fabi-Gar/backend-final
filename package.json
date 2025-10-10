@@ -22,10 +22,6 @@
     "format": "echo 'format placeholder'"
   },
   "dependencies": {
-    "@types/helmet": "^0.0.48",
-    "@types/ioredis": "^4.28.10",
-    "@types/pino": "^7.0.4",
-    "@types/pino-http": "^5.8.4",
     "argon2": "^0.44.0",
     "bcrypt": "^5.1.1",
     "bullmq": "^5.61.0",
@@ -42,18 +38,22 @@
     "pino": "^10.0.0",
     "pino-http": "^11.0.0",
     "reflect-metadata": "^0.2.2",
+    "typeorm": "^0.3.27",
     "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/bcrypt": "^5.0.2",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
+    "@types/helmet": "^0.0.48",
+    "@types/ioredis": "^4.28.10",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.6.2",
+    "@types/pino": "^7.0.4",
+    "@types/pino-http": "^5.8.4",
     "cross-env": "^10.1.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.20.6",
-    "typeorm": "^0.3.27",
     "typescript": "^5.9.3"
   }
 }

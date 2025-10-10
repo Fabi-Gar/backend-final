@@ -93,6 +93,74 @@ async function main() {
       'Ataque directo','Ataque indirecto','Control natural'
     ])
 
+const hasDepartamentos = await tableExists(q, 'departamentos')
+const hasMunicipios = await tableExists(q, 'municipios')
+if (hasDepartamentos && hasMunicipios) {
+  // Inserta el departamento si no existe
+  await q.query(
+    `INSERT INTO departamentos (nombre)
+     SELECT $1
+     WHERE NOT EXISTS (SELECT 1 FROM departamentos WHERE nombre = $1);`,
+    ['Huehuetenango']
+  )
+
+  // Obtén su UUID
+  const depRes = await q.query(
+    `SELECT departamento_uuid FROM departamentos WHERE nombre = $1 LIMIT 1`,
+    ['Huehuetenango']
+  )
+  const deptoUuid = depRes?.[0]?.departamento_uuid
+
+  if (deptoUuid) {
+    const municipiosHuehue = [
+      'Huehuetenango',
+      'Chiantla',
+      'Malacatancito',
+      'Cuilco',
+      'Nentón',
+      'San Pedro Necta',
+      'San Juan Ixcoy',
+      'San Antonio Huista',
+      'San Sebastián Huehuetenango',
+      'Santa Bárbara',
+      'La Libertad',
+      'La Democracia',
+      'San Miguel Acatán',
+      'San Rafael La Independencia',
+      'Todos Santos Cuchumatán',
+      'San Juan Atitán',
+      'Santa Eulalia',
+      'San Mateo Ixtatán',
+      'Colotenango',
+      'San Sebastián Coatán',
+      'Santa Cruz Barillas',
+      'San Pedro Soloma',
+      'San Ildefonso Ixtahuacán',
+      'Jacaltenango',
+      'San Rafael Petzal',
+      'San Gaspar Ixchil',
+      'Santiago Chimaltenango',
+      'Santa Ana Huista',
+      'Tectitán',
+      'Concepción Huista',
+      'San Juan Huista',
+      'Unión Cantinil',
+      'Aguacatán',
+    ]
+
+    for (const m of municipiosHuehue) {
+      await q.query(
+        `INSERT INTO municipios (departamento_uuid, nombre)
+         SELECT $1, $2
+         WHERE NOT EXISTS (
+           SELECT 1 FROM municipios WHERE departamento_uuid = $1 AND nombre = $2
+         );`,
+        [deptoUuid, m]
+      )
+    }
+  }
+}
+
     // ===== ADMIN por defecto (requiere pgcrypto en migraciones)
     await q.query(`
       WITH r AS (SELECT rol_uuid FROM roles WHERE nombre='ADMIN'),
@@ -105,7 +173,7 @@ async function main() {
     `)
 
     await q.commitTransaction()
-    console.log('Seed OK ✅ (roles, estados, medios, instituciones, catálogos y admin)')
+    console.log('Seed OK ✅ (roles, estados, medios, instituciones, catálogos, Huehuetenango y admin)')
   } catch (e) {
     await q.rollbackTransaction()
     console.error('Seed FAILED', e)

@@ -7,7 +7,7 @@ exports.AppDataSource = void 0;
 require("reflect-metadata");
 const typeorm_1 = require("typeorm");
 const env_1 = __importDefault(require("../config/env"));
-// Fuerza que jamás se use SSL sin importar el entorno
+const naming_strategy_1 = require("../naming-strategy");
 delete process.env.PGSSLMODE;
 delete process.env.PGSSLROOTCERT;
 delete process.env.PGSSLCERT;
@@ -30,7 +30,11 @@ exports.AppDataSource = new typeorm_1.DataSource({
     },
     synchronize: false,
     logging: false,
-    entities: ['dist/modules/**/entities/*.js'],
-    migrations: ['dist/db/migrations/*.js'],
+    entities: [
+        'src/modules/**/entities/**/*.{ts,js}',
+        'dist/modules/**/entities/**/*.js'
+    ],
+    migrations: ['src/db/migrations/*.{ts,js}', 'dist/db/migrations/*.js'],
     migrationsTableName: 'migrations',
+    namingStrategy: new naming_strategy_1.SnakeNamingStrategy(),
 });
