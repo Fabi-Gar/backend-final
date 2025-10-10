@@ -24,6 +24,8 @@ import institucionesRoutes from './modules/seguridad/instituciones.routes'
 import estadosIncendioRoutes from './app/estados-incendio.routes'
 import puntosCalorRoutes from './modules/geoespacial/puntos-calor.routes'
 import monitorRoutes from './app/monitor.routes'
+import departamentosRoutes from './modules/catalogos/entities/departamentos.routes'
+import cierreRoutes from './modules/cierre/cierre.routes'  
 
 const logger = pino({ level: env.LOG_LEVEL })
 const app = express()
@@ -73,6 +75,9 @@ app.use('/catalogos', catalogosRoutes)        // /catalogos/*
 app.use('/roles', rolesRoutes)                // /roles/*
 app.use('/firms', firmsRoutes)            // /api/firms/run, /api/firms/puntos, etc.
 app.use('/monitor', monitorRoutes)
+app.use('/departamentos', departamentosRoutes)          // /monitor/jobs, /monitor/auditoria
+
+app.use('/cierre', cierreRoutes)
 
 app.use('/instituciones', institucionesRoutes)// /instituciones/*
 app.use('/puntos-calor', puntosCalorRoutes)   // /puntos-calor/*

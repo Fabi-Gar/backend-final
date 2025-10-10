@@ -7,6 +7,10 @@ import { Usuario } from '../seguridad/entities/usuario.entity'
 import { FindOptionsWhere, ILike, IsNull, Between } from 'typeorm'
 import { guardAuth, guardAdmin } from '../../middlewares/auth'
 import { auditRecord } from '../auditoria/auditoria.service'
+import { EstadoIncendio } from '../catalogos/entities/estado-incendio.entity'
+import { IncendioEstadoHistorial } from './entities/incendio-estado-historial.entity'
+
+const router = Router()
 
 // --- helpers ---
 const point4326 = z.object({
@@ -14,23 +18,41 @@ const point4326 = z.object({
   coordinates: z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90)])
 })
 
+// helper para default:
+async function getDefaultEstadoUuid() {
+  const repo = AppDataSource.getRepository(EstadoIncendio)
+  // 1) intenta por codigo 'REPORTADO'
+  const byCode = await repo.createQueryBuilder('e')
+    .where('e.eliminado_en IS NULL AND e.codigo = :c', { c: 'REPORTADO' })
+    .getOne()
+  if (byCode) return (byCode as any).estado_incendio_uuid
+
+  // 2) cae al de menor orden
+  const byOrden = await repo.createQueryBuilder('e')
+    .where('e.eliminado_en IS NULL')
+    .orderBy('e.orden', 'ASC')
+    .getOne()
+  if (byOrden) return (byOrden as any).estado_incendio_uuid
+
+  return null
+}
+
 const createIncendioSchema = z.object({
   titulo: z.string().min(1),
   descripcion: z.string().nullish(),
-  centroide: point4326.nullish(),                 // opcional
-  estado_incendio_uuid: z.string().uuid().nullish()
+  centroide: point4326.nullish(),
+  estado_incendio_uuid: z.string().uuid().optional(), // server pone default si no viene
 })
 
+// ⚠️ Importante: NO permitir null; si permites null aquí, romperás el NOT NULL en DB.
 const updateIncendioSchema = z.object({
   titulo: z.string().min(1).optional(),
   descripcion: z.string().optional(),
   centroide: point4326.nullish().optional(),
-  estado_incendio_uuid: z.string().uuid().nullish().optional()
+  estado_incendio_uuid: z.string().uuid().optional(), // <-- sin nullish
 })
 
-const router = Router()
-
-// GET /incendios  (público)  — filtros: q, desde, hasta
+// -------------------- LISTAR --------------------
 router.get('/', async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim()
@@ -56,7 +78,7 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// GET /incendios/:uuid  (detalle público solo si aprobado)
+// -------------------- DETALLE --------------------
 router.get('/:uuid', async (req, res, next) => {
   try {
     const { uuid } = z.object({ uuid: z.string().uuid() }).parse(req.params)
@@ -74,15 +96,24 @@ router.get('/:uuid', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// POST /incendios  (auth) — crea pendiente de moderación
+// -------------------- CREAR --------------------
 router.post('/', guardAuth, async (req, res, next) => {
   try {
     const body = createIncendioSchema.parse(req.body)
     const user = res.locals.ctx.user as Usuario
-
     const repo = AppDataSource.getRepository(Incendio)
 
-    // ✨ Tipado explícito para evitar la sobrecarga de array
+    const estadoUuid =
+      body.estado_incendio_uuid ??
+      (await getDefaultEstadoUuid())
+
+    if (!estadoUuid) {
+      return res.status(500).json({
+        error: { code: 'DEFAULT_STATE_MISSING', message: 'No existe estado por defecto en catálogo' },
+        requestId: res.locals.ctx?.requestId
+      })
+    }
+
     const ent = repo.create({
       titulo: body.titulo,
       descripcion: body.descripcion ?? null,
@@ -90,16 +121,22 @@ router.post('/', guardAuth, async (req, res, next) => {
       requiere_aprobacion: true,
       aprobado: false,
       creado_por: { usuario_uuid: user.usuario_uuid } as any,
-      estado_incendio: body.estado_incendio_uuid
-        ? ({ estado_incendio_uuid: body.estado_incendio_uuid } as any)
-        : null
+      estado_incendio: { estado_incendio_uuid: estadoUuid } as any, // nunca null
     } as Partial<Incendio>) as Incendio
 
-    const saved = await repo.save<Incendio>(ent) // 👈 fuerza la sobrecarga de 1 entidad
+    const saved = await repo.save(ent)
+
+    // historial inicial
+    await AppDataSource.getRepository(IncendioEstadoHistorial).save({
+      incendio: { incendio_uuid: saved.incendio_uuid } as any,
+      estado_incendio: { estado_incendio_uuid: estadoUuid } as any,
+      cambiado_por: { usuario_uuid: user.usuario_uuid } as any,
+      observacion: 'Estado inicial',
+    })
 
     await auditRecord({
       tabla: 'incendios',
-      registro_uuid: saved.incendio_uuid, // ahora sí existe
+      registro_uuid: saved.incendio_uuid,
       accion: 'INSERT',
       despues: saved,
       ctx: res.locals.ctx
@@ -117,8 +154,7 @@ router.post('/', guardAuth, async (req, res, next) => {
   }
 })
 
-
-// PATCH /incendios/:uuid  (creador o admin)
+// -------------------- ACTUALIZAR --------------------
 router.patch('/:uuid', guardAuth, async (req, res, next) => {
   try {
     const { uuid } = z.object({ uuid: z.string().uuid() }).parse(req.params)
@@ -126,8 +162,21 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
     const user = res.locals.ctx.user as Usuario
 
     const repo = AppDataSource.getRepository(Incendio)
+
+    // obtén el estado previo directamente de la tabla (columna FK)
+    const prevRow = await AppDataSource.query(
+      `SELECT estado_incendio_uuid FROM incendios WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
+      [uuid],
+    )
+    if (!prevRow.length) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Incendio no existe' }, requestId: res.locals.ctx?.requestId })
+    }
+    const prevEstadoUuid: string = prevRow[0].estado_incendio_uuid
+
     const inc = await repo.findOne({ where: { incendio_uuid: uuid, eliminado_en: IsNull() } })
-    if (!inc) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Incendio no existe' }, requestId: res.locals.ctx?.requestId })
+    if (!inc) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Incendio no existe' }, requestId: res.locals.ctx?.requestId })
+    }
 
     const esCreador = (inc as any).creado_por_uuid === user.usuario_uuid
     if (!user.is_admin && !esCreador) {
@@ -139,17 +188,37 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
     if (typeof body.titulo === 'string') inc.titulo = body.titulo
     if (typeof body.descripcion === 'string') (inc as any).descripcion = body.descripcion
     if (typeof body.centroide !== 'undefined') (inc as any).centroide = body.centroide ?? null
+
+    // si viene estado_incendio_uuid, lo seteamos (NO permitir null aquí)
+    let nuevoEstadoUuid: string | null = null
     if (typeof body.estado_incendio_uuid !== 'undefined') {
-      (inc as any).estado_incendio = body.estado_incendio_uuid ? { estado_incendio_uuid: body.estado_incendio_uuid } as any : null
+      nuevoEstadoUuid = body.estado_incendio_uuid
+      ;(inc as any).estado_incendio = { estado_incendio_uuid: body.estado_incendio_uuid } as any
     }
 
     const saved = await repo.save(inc)
+
+    // si cambió el estado, guarda historial
+    if (nuevoEstadoUuid && nuevoEstadoUuid !== prevEstadoUuid) {
+      await AppDataSource.getRepository(IncendioEstadoHistorial).save({
+        incendio: { incendio_uuid: saved.incendio_uuid } as any,
+        estado_incendio: { estado_incendio_uuid: nuevoEstadoUuid } as any,
+        cambiado_por: { usuario_uuid: user.usuario_uuid } as any,
+        observacion: 'Cambio de estado por edición',
+      })
+    }
+
     await auditRecord({
       tabla: 'incendios',
       registro_uuid: saved.incendio_uuid,
       accion: 'UPDATE',
       antes: before,
-      despues: { titulo: saved.titulo, descripcion: (saved as any).descripcion, centroide: (saved as any).centroide, estado_incendio_uuid: (saved as any).estado_incendio_uuid },
+      despues: {
+        titulo: saved.titulo,
+        descripcion: (saved as any).descripcion,
+        centroide: (saved as any).centroide,
+        estado_incendio_uuid: nuevoEstadoUuid ?? prevEstadoUuid,
+      },
       ctx: res.locals.ctx
     })
 
@@ -160,7 +229,7 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
   }
 })
 
-// PATCH /incendios/:uuid/aprobar  (admin)
+// -------------------- APROBAR --------------------
 router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => {
   try {
     const { uuid } = z.object({ uuid: z.string().uuid() }).parse(req.params)
@@ -191,7 +260,7 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
   } catch (err) { next(err) }
 })
 
-// PATCH /incendios/:uuid/rechazar  (admin)
+// -------------------- RECHAZAR --------------------
 router.patch('/:uuid/rechazar', guardAuth, guardAdmin, async (req, res, next) => {
   try {
     const { uuid } = z.object({ uuid: z.string().uuid() }).parse(req.params)

@@ -5,13 +5,9 @@ import { guardAdmin, guardAuth } from '../middlewares/auth'
 
 const router = Router()
 
-// -------------------- Catálogos soportados --------------------
 const CATALOGS: Record<string, { table: string, id: string }> = {
-  // básicos
   medios: { table: 'medios', id: 'medio_uuid' },
   instituciones: { table: 'instituciones', id: 'institucion_uuid' },
-
-  // cierre y soporte
   tipos_incendio: { table: 'tipos_incendio', id: 'tipo_incendio_id' },
   tipo_propiedad: { table: 'tipo_propiedad', id: 'tipo_propiedad_id' },
   causas_catalogo: { table: 'causas_catalogo', id: 'causa_id' },
@@ -20,11 +16,7 @@ const CATALOGS: Record<string, { table: string, id: string }> = {
   medios_terrestres_catalogo: { table: 'medios_terrestres_catalogo', id: 'medio_terrestre_id' },
   medios_acuaticos_catalogo: { table: 'medios_acuaticos_catalogo', id: 'medio_acuatico_id' },
   abastos_catalogo: { table: 'abastos_catalogo', id: 'abasto_id' },
-
-  // opcional
   tecnicas_extincion_catalogo: { table: 'tecnicas_extincion_catalogo', id: 'tecnica_id' },
-
-  // NUEVO: roles (tiene nombre + descripcion)
   roles: { table: 'roles', id: 'rol_uuid' },
 }
 
@@ -34,7 +26,6 @@ function resolveCatalog(nombre: string) {
   return cfg
 }
 
-// Esquemas genéricos (roles se maneja como caso especial)
 const createSchema = z.object({ nombre: z.string().min(1) })
 const updateSchema = z.object({ nombre: z.string().min(1) })
 const createRoleSchema = z.object({
@@ -46,7 +37,10 @@ const updateRoleSchema = z.object({
   descripcion: z.string().optional().nullable(),
 })
 
-// -------------------- Listar catálogo --------------------
+router.get('/', guardAuth, async (_req, res) => {
+  res.json({ items: Object.keys(CATALOGS) })
+})
+
 router.get('/:catalogo', guardAuth, async (req, res, next) => {
   try {
     const catalogo = String(req.params.catalogo)
@@ -55,7 +49,6 @@ router.get('/:catalogo', guardAuth, async (req, res, next) => {
     const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '50'), 10) || 50, 1), 200)
 
-    // count
     const totalRows = await AppDataSource.query(
       `SELECT COUNT(*)::int AS total
        FROM ${table}
@@ -65,7 +58,6 @@ router.get('/:catalogo', guardAuth, async (req, res, next) => {
     )
     const total = totalRows?.[0]?.total ?? 0
 
-    // page (roles incluye descripcion)
     const selectCols =
       catalogo === 'roles'
         ? `${id} AS id, nombre, descripcion, creado_en, actualizado_en`
@@ -88,7 +80,31 @@ router.get('/:catalogo', guardAuth, async (req, res, next) => {
   }
 })
 
-// -------------------- Crear (idempotente por nombre) --------------------
+router.get('/:catalogo/:id', guardAuth, async (req, res, next) => {
+  try {
+    const catalogo = String(req.params.catalogo)
+    const { table, id: idCol } = resolveCatalog(catalogo)
+    const id = String(req.params.id)
+
+    const selectCols =
+      catalogo === 'roles'
+        ? `${idCol} AS id, nombre, descripcion, creado_en, actualizado_en`
+        : `${idCol} AS id, nombre, creado_en, actualizado_en`
+
+    const rows = await AppDataSource.query(
+      `SELECT ${selectCols}
+       FROM ${table}
+       WHERE ${idCol} = $1 AND eliminado_en IS NULL`,
+      [id]
+    )
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+    res.json(rows[0])
+  } catch (e: any) {
+    if (e?.status) return res.status(e.status).json({ code: e.message })
+    next(e)
+  }
+})
+
 router.post('/:catalogo', guardAdmin, async (req, res, next) => {
   try {
     const catalogo = String(req.params.catalogo)
@@ -127,7 +143,6 @@ router.post('/:catalogo', guardAdmin, async (req, res, next) => {
   }
 })
 
-// -------------------- Actualizar --------------------
 router.patch('/:catalogo/:id', guardAdmin, async (req, res, next) => {
   try {
     const catalogo = String(req.params.catalogo)
@@ -174,7 +189,6 @@ router.patch('/:catalogo/:id', guardAdmin, async (req, res, next) => {
   }
 })
 
-// -------------------- Soft delete --------------------
 router.delete('/:catalogo/:id', guardAdmin, async (req, res, next) => {
   try {
     const { table, id: idCol } = resolveCatalog(String(req.params.catalogo))
