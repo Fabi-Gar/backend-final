@@ -12,11 +12,42 @@ import { IncendioEstadoHistorial } from './entities/incendio-estado-historial.en
 
 const router = Router()
 
+
+
 // --- helpers ---
 const point4326 = z.object({
   type: z.literal('Point'),
   coordinates: z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90)])
 })
+
+
+type PgErrorMapped = { status: number; body: Record<string, any> } | null;
+
+const mapPgError = (err: any): PgErrorMapped => {
+  // FK violation
+  if (err?.code === '23503') {
+    return {
+      status: 400,
+      body: { code: 'FK_VIOLATION', detail: err?.detail, constraint: err?.constraint }
+    };
+  }
+  // NOT NULL
+  if (err?.code === '23502') {
+    return {
+      status: 400,
+      body: { code: 'NOT_NULL_VIOLATION', column: err?.column, table: err?.table }
+    };
+  }
+  // UNIQUE
+  if (err?.code === '23505') {
+    return {
+      status: 409,
+      body: { code: 'UNIQUE_VIOLATION', detail: err?.detail, constraint: err?.constraint }
+    };
+  }
+  return null;
+};
+
 
 // helper para default:
 async function getDefaultEstadoUuid() {
@@ -44,6 +75,29 @@ const createIncendioSchema = z.object({
   estado_incendio_uuid: z.string().uuid().optional(), // server pone default si no viene
 })
 
+
+const createIncendioWithReporteSchema = z.object({
+  // campos del incendio
+  titulo: z.string().min(1),
+  descripcion: z.string().nullish(),
+  centroide: point4326.nullish(),
+  estado_incendio_uuid: z.string().uuid().optional(),
+
+  // bloque del reporte (obligatorio)
+  reporte: z.object({
+    institucion_uuid: z.string().uuid().optional().nullable(), // se completa con el perfil si no viene
+    medio_uuid: z.string().uuid(),
+    ubicacion: point4326.nullish(), // si no viene, usamos el centroide del incendio
+    reportado_en: z.coerce.date().optional(),
+    observaciones: z.string().optional().nullable(),
+    telefono: z.string().optional().nullable(),
+    departamento_uuid: z.string().uuid().optional().nullable(),
+    municipio_uuid: z.string().uuid().optional().nullable(),
+    lugar_poblado: z.string().optional().nullable(),
+    finca: z.string().optional().nullable(),
+  }),
+})
+
 // ⚠️ Importante: NO permitir null; si permites null aquí, romperás el NOT NULL en DB.
 const updateIncendioSchema = z.object({
   titulo: z.string().min(1).optional(),
@@ -51,6 +105,92 @@ const updateIncendioSchema = z.object({
   centroide: point4326.nullish().optional(),
   estado_incendio_uuid: z.string().uuid().optional(), // <-- sin nullish
 })
+
+router.get('/sin-aprobar', guardAdmin, async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '50'), 10) || 50, 1), 200);
+
+    // Total
+    const totalRows = await AppDataSource.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM incendios i
+      WHERE i.eliminado_en IS NULL
+        AND i.aprobado = FALSE
+        AND ($1 = '' OR i.titulo ILIKE '%' || $1 || '%')
+      `,
+      [q]
+    );
+    const total = totalRows?.[0]?.total ?? 0;
+
+    // Items (sin JOIN a regiones; región derivada de último reporte)
+    const items = await AppDataSource.query(
+      `
+      SELECT
+        i.incendio_uuid,
+        i.titulo,
+        i.descripcion,
+        i.centroide,
+        i.creado_en,
+        i.requiere_aprobacion,
+        jsonb_build_object(
+          'usuario_uuid', u.usuario_uuid,
+          'nombre', u.nombre,
+          'apellido', u.apellido,
+          'email', u.email
+        ) AS creado_por,
+        CASE
+          WHEN lr.depto_nombre IS NOT NULL OR lr.muni_nombre IS NOT NULL THEN
+            jsonb_build_object(
+              'region_uuid', NULL,
+              'nombre',
+              trim(
+                COALESCE(lr.depto_nombre,'') ||
+                CASE WHEN lr.depto_nombre IS NOT NULL AND lr.muni_nombre IS NOT NULL THEN ' / ' ELSE '' END ||
+                COALESCE(lr.muni_nombre,'')
+              )
+            )
+          ELSE NULL
+        END AS region,
+        CASE WHEN lr.reportado_en IS NULL THEN NULL ELSE
+          jsonb_build_object(
+            'reportado_por_nombre', lr.reportado_por_nombre,
+            'reportado_en', lr.reportado_en,
+            'telefono', lr.telefono
+          )
+        END AS ultimo_reporte
+      FROM incendios i
+      LEFT JOIN usuarios u ON u.usuario_uuid = i.creado_por_uuid
+      LEFT JOIN LATERAL (
+        SELECT
+          r.reportado_por_nombre,
+          r.reportado_en,
+          r.telefono,
+          d.nombre AS depto_nombre,
+          m.nombre AS muni_nombre
+        FROM reportes r
+        LEFT JOIN departamentos d ON d.departamento_uuid = r.departamento_uuid
+        LEFT JOIN municipios   m ON m.municipio_uuid   = r.municipio_uuid
+        WHERE r.eliminado_en IS NULL
+          AND r.incendio_uuid = i.incendio_uuid
+        ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC
+        LIMIT 1
+      ) lr ON TRUE
+      WHERE i.eliminado_en IS NULL
+        AND i.aprobado = FALSE
+        AND ($1 = '' OR i.titulo ILIKE '%' || $1 || '%')
+      ORDER BY i.creado_en DESC
+      LIMIT $2 OFFSET $3
+      `,
+      [q, pageSize, (page - 1) * pageSize]
+    );
+
+    res.json({ total, page, pageSize, items });
+  } catch (err) { next(err); }
+});
+
 
 // -------------------- LISTAR --------------------
 router.get('/', async (req, res, next) => {
@@ -95,6 +235,257 @@ router.get('/:uuid', async (req, res, next) => {
     res.json(item)
   } catch (err) { next(err) }
 })
+
+// -------------------- CREAR (incendio + primer reporte) --------------------
+// POST /incendios/with-reporte
+const incendioFields = z.object({
+  titulo: z.string().min(1),
+  descripcion: z.string().nullish(),
+  centroide: point4326.nullish(),
+  estado_incendio_uuid: z.string().uuid().optional(),
+});
+
+const reporteFields = z.object({
+  institucion_uuid: z.string().uuid().optional().nullable(),
+  medio_uuid: z.string().uuid(),
+  ubicacion: point4326.nullish(),
+  reportado_en: z.coerce.date().optional(),
+  observaciones: z.string().optional().nullable(),
+  telefono: z.string().optional().nullable(),
+  departamento_uuid: z.string().uuid().optional().nullable(),
+  municipio_uuid: z.string().uuid().optional().nullable(),
+  lugar_poblado: z.string().optional().nullable(),
+  finca: z.string().optional().nullable(),
+});
+
+// 2) Dos esquemas válidos
+const schemaPlano = incendioFields.extend({ reporte: reporteFields });
+const schemaAnidado = z.object({ incendio: incendioFields, reporte: reporteFields });
+
+// -------------------- CREAR INCENDIO + REPORTE --------------------
+router.post('/with-reporte', guardAuth, async (req, res, next) => {
+  try {
+    const user = res.locals?.ctx?.user as Usuario | undefined;
+    if (!user?.usuario_uuid) {
+      return res.status(401).json({ error: { code: 'UNAUTHENTICATED' } });
+    }
+
+    // 3) Intentar parsear primero como plano; si falla, intentar anidado
+    let body: z.infer<typeof schemaPlano>;
+    try {
+      body = schemaPlano.parse(req.body);
+    } catch {
+      const tmp = schemaAnidado.parse(req.body);
+      body = { ...tmp.incendio, reporte: tmp.reporte };
+    }
+
+    // 4) Resolver estado por defecto
+    const estadoUuid = body.estado_incendio_uuid ?? (await getDefaultEstadoUuid());
+    if (!estadoUuid) {
+      return res.status(500).json({
+        error: { code: 'DEFAULT_STATE_MISSING', message: 'No existe estado por defecto en catálogo' },
+        requestId: res.locals.ctx?.requestId,
+      });
+    }
+
+    // 5) Institución desde el payload o perfil
+    const institucionUuid =
+      body.reporte.institucion_uuid ??
+      (user as any)?.institucion_uuid ??
+      (user as any)?.institucion?.institucion_uuid ??
+      null;
+
+    const reportanteNombre =
+      `${(user as any)?.nombre ?? ''} ${(user as any)?.apellido ?? ''}`.trim() ||
+      (user as any)?.email ||
+      'Usuario';
+
+    const result = await AppDataSource.transaction(async (trx) => {
+      // Crear incendio
+      const incRepo = trx.getRepository(Incendio);
+      const inc = incRepo.create({
+        titulo: body.titulo,
+        descripcion: body.descripcion ?? null,
+        centroide: body.centroide ?? null,
+        requiere_aprobacion: true,
+        aprobado: false,
+        creado_por: { usuario_uuid: (user as any).usuario_uuid } as any,
+        estado_incendio: { estado_incendio_uuid: estadoUuid } as any,
+      } as Partial<Incendio>) as Incendio;
+
+      const savedInc = await incRepo.save(inc);
+
+      // Historial inicial
+      await trx.getRepository(IncendioEstadoHistorial).save({
+        incendio: { incendio_uuid: savedInc.incendio_uuid } as any,
+        estado_incendio: { estado_incendio_uuid: estadoUuid } as any,
+        cambiado_por: { usuario_uuid: (user as any).usuario_uuid } as any,
+        observacion: 'Estado inicial (creación con reporte)',
+      });
+
+      // Crear reporte (ubicación = reporte.ubicacion || incendio.centroide)
+      const ubicacionGeoJSON = (body.reporte.ubicacion ?? body.centroide) ?? null;
+
+      await trx.query(
+        `
+        INSERT INTO reportes (
+          incendio_uuid, institucion_uuid, medio_uuid, ubicacion, reportado_en,
+          observaciones, telefono, departamento_uuid, municipio_uuid, lugar_poblado, finca,
+          reportado_por_uuid, reportado_por_nombre, creado_en
+        ) VALUES (
+          $1, $2, $3,
+          CASE WHEN $4::text IS NULL THEN NULL
+               ELSE ST_SetSRID(ST_GeomFromGeoJSON($4::text), 4326) END,
+          $5, $6, $7, $8, $9, $10, $11, $12, $13, now()
+        )
+        `,
+        [
+          savedInc.incendio_uuid,
+          institucionUuid,
+          body.reporte.medio_uuid,
+          ubicacionGeoJSON ? JSON.stringify(ubicacionGeoJSON) : null,
+          body.reporte.reportado_en ?? new Date(),
+          body.reporte.observaciones ?? null,
+          body.reporte.telefono ?? null,
+          body.reporte.departamento_uuid ?? null,
+          body.reporte.municipio_uuid ?? null,
+          body.reporte.lugar_poblado ?? null,
+          body.reporte.finca ?? null,
+          (user as any).usuario_uuid,
+          reportanteNombre,
+        ]
+      );
+
+      await auditRecord({
+        tabla: 'incendios',
+        registro_uuid: savedInc.incendio_uuid,
+        accion: 'INSERT',
+        despues: savedInc,
+        ctx: res.locals.ctx,
+      });
+
+      return savedInc;
+    });
+
+    const full = await AppDataSource.getRepository(Incendio).findOne({
+      where: { incendio_uuid: result.incendio_uuid, eliminado_en: IsNull() },
+      relations: { creado_por: true },
+    });
+
+    return res.status(201).json(full ?? result);
+  } catch (err: any) {
+    if (err?.issues) {
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: 'Validación', issues: err.issues },
+        requestId: res.locals.ctx?.requestId,
+      });
+    }
+    next(err);
+  }
+});
+
+
+
+
+router.get('/with-ultimo-reporte', async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '2000'), 10) || 2000, 1), 5000);
+
+    // Filtros de fecha opcionales
+    const desde = req.query.desde ? new Date(String(req.query.desde)) : undefined;
+    const hasta = req.query.hasta ? new Date(String(req.query.hasta)) : undefined;
+
+    // Total
+    const totalRows = await AppDataSource.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM incendios i
+      WHERE i.eliminado_en IS NULL
+        AND i.aprobado = TRUE
+        AND ($1 = '' OR i.titulo ILIKE '%' || $1 || '%')
+        AND ($2::timestamptz IS NULL OR i.creado_en >= $2)
+        AND ($3::timestamptz IS NULL OR i.creado_en <= $3)
+      `,
+      [q, desde ?? null, hasta ?? null]
+    );
+    const total = totalRows?.[0]?.total ?? 0;
+
+    // Items con último reporte (LATERAL) + región si existe, con fallback a depto/muni del último reporte
+    const items = await AppDataSource.query(
+      `
+      SELECT
+        i.incendio_uuid,
+        i.titulo,
+        i.descripcion,
+        i.centroide,
+        i.creado_en,
+        jsonb_build_object(
+          'usuario_uuid', u.usuario_uuid,
+          'nombre', u.nombre,
+          'apellido', u.apellido,
+          'email', u.email
+        ) AS creado_por,
+        -- Región directa (si i.region_uuid existe y hay tabla regiones):
+        CASE WHEN r.region_uuid IS NOT NULL THEN
+          jsonb_build_object('region_uuid', r.region_uuid, 'nombre', r.nombre)
+        ELSE
+          -- Fallback: usa depto/muni del último reporte
+          CASE WHEN lr.depto_nombre IS NOT NULL OR lr.muni_nombre IS NOT NULL THEN
+            jsonb_build_object(
+              'region_uuid', NULL,
+              'nombre', trim(
+                COALESCE(lr.depto_nombre,'') || 
+                CASE WHEN lr.depto_nombre IS NOT NULL AND lr.muni_nombre IS NOT NULL THEN ' / ' ELSE '' END ||
+                COALESCE(lr.muni_nombre,'')
+              )
+            )
+          ELSE NULL END
+        END AS region,
+        CASE WHEN lr.reportado_en IS NULL THEN NULL ELSE
+          jsonb_build_object(
+            'reportado_por_nombre', lr.reportado_por_nombre,
+            'reportado_en', lr.reportado_en,
+            'telefono', lr.telefono
+          )
+        END AS ultimo_reporte
+      FROM incendios i
+      LEFT JOIN usuarios u ON u.usuario_uuid = i.creado_por_uuid
+      -- ÚLTIMO REPORTE por incendio
+      LEFT JOIN LATERAL (
+        SELECT
+          r.reportado_por_nombre,
+          r.reportado_en,
+          r.telefono,
+          d.nombre AS depto_nombre,
+          m.nombre AS muni_nombre
+        FROM reportes r
+        LEFT JOIN departamentos d ON d.departamento_uuid = r.departamento_uuid
+        LEFT JOIN municipios   m ON m.municipio_uuid   = r.municipio_uuid
+        WHERE r.eliminado_en IS NULL
+          AND r.incendio_uuid = i.incendio_uuid
+        ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC
+        LIMIT 1
+      ) lr ON TRUE
+      -- Región por FK directa si la tienes
+      LEFT JOIN regiones r ON r.region_uuid = i.region_uuid
+      WHERE i.eliminado_en IS NULL
+        AND i.aprobado = TRUE
+        AND ($1 = '' OR i.titulo ILIKE '%' || $1 || '%')
+        AND ($2::timestamptz IS NULL OR i.creado_en >= $2)
+        AND ($3::timestamptz IS NULL OR i.creado_en <= $3)
+      ORDER BY i.creado_en DESC
+      LIMIT $4 OFFSET $5
+      `,
+      [q, desde ?? null, hasta ?? null, pageSize, (page - 1) * pageSize]
+    );
+
+    res.json({ total, page, pageSize, items });
+  } catch (err) { next(err); }
+});
+
+
 
 // -------------------- CREAR --------------------
 router.post('/', guardAuth, async (req, res, next) => {

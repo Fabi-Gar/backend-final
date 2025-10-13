@@ -31,6 +31,20 @@ async function getIncendioBasic(uuid: string) {
   return rows?.[0] || null
 }
 
+function estadoDesdeSecuencia(sc?: {
+  llegada_medios_terrestres_at?: string | Date | null
+  llegada_medios_aereos_at?: string | Date | null
+  controlado_at?: string | Date | null
+  extinguido_at?: string | Date | null
+}) {
+  if (!sc) return 'Pendiente'
+  if (sc.extinguido_at) return 'Extinguido'
+  if (sc.controlado_at) return 'Controlado'
+  if (sc.llegada_medios_terrestres_at || sc.llegada_medios_aereos_at) return 'En atención'
+  return 'Pendiente'
+}
+
+
 async function isClosed(incendio_uuid: string) {
   const r = await AppDataSource.query(
     `SELECT extinguido_at FROM cierre_secuencia_control
@@ -300,6 +314,14 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
           [incendio_uuid, m.medio_terrestre_id, m.cantidad ?? 1]
         )
       }
+      // Autocompletar llegada de medios terrestres si estaba vacío
+      await AppDataSource.query(
+        `UPDATE cierre_secuencia_control
+         SET llegada_medios_terrestres_at = COALESCE(llegada_medios_terrestres_at, now()),
+             actualizado_en = now()
+         WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
+        [incendio_uuid]
+      )
       updatesFeed.push('Medios terrestres actualizados')
       auditAfter.medios_terrestres = body.medios_terrestres
     }
@@ -315,6 +337,14 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
           [incendio_uuid, m.medio_aereo_id, String(m.pct)]
         )
       }
+      // Autocompletar llegada de medios aéreos si estaba vacío
+      await AppDataSource.query(
+        `UPDATE cierre_secuencia_control
+         SET llegada_medios_aereos_at = COALESCE(llegada_medios_aereos_at, now()),
+             actualizado_en = now()
+         WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
+        [incendio_uuid]
+      )
       updatesFeed.push('Medios aéreos actualizados')
       auditAfter.medios_aereos = body.medios_aereos
     }
@@ -421,10 +451,48 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
     }
 
     return res.json({ ok: true })
-  } catch (e: any) {
-    if (e?.issues) return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues })
-    next(e)
+} catch (e: any) {
+  // Zod / validación
+  if (e?.issues) {
+    return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues })
   }
+
+  // TypeORM / PG
+  const d = e?.driverError ?? e
+  if (d?.code) {
+    // Mapeo de mensajes amigables por constraint (ajusta nombres reales)
+    const friendlyByConstraint: Record<string, string> = {
+    }
+
+    const base = {
+      code: 'DB_ERROR',
+      pg_code: d.code,
+      table: d.table ?? null,
+      constraint: d.constraint ?? null,
+      detail: d.detail ?? null,
+      hint: d.hint ?? null,
+      traceId: res.locals?.ctx?.requestId ?? null,
+    }
+
+    if (d.code === '23503') {
+      const friendly =
+        (d.constraint && friendlyByConstraint[d.constraint]) ||
+        'Violación de llave foránea: algún id de catálogo no existe.'
+      return res.status(422).json({ ...base, message: friendly })
+    }
+    if (d.code === '23505') {
+      return res.status(409).json({ ...base, message: 'Registro duplicado (unique_violation).' })
+    }
+    if (d.code === '23502') {
+      return res.status(400).json({ ...base, message: 'Campo requerido es NULL (not_null_violation).' })
+    }
+
+    return res.status(400).json({ ...base, message: 'Error de base de datos.' })
+  }
+
+  return next(e)
+}
+
 })
 
 // ================== POST /:incendio_uuid/finalizar ==================
@@ -436,7 +504,7 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
     await ensureBaseRecords(incendio_uuid)
 
     const prev = await AppDataSource.query(
-      `SELECT extinguido_at
+      `SELECT controlado_at, extinguido_at
        FROM cierre_secuencia_control
        WHERE incendio_uuid = $1
          AND eliminado_en IS NULL`,
@@ -448,11 +516,12 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
     if (!alreadyClosed) {
       const rows = await AppDataSource.query(
         `UPDATE cierre_secuencia_control
-         SET extinguido_at = now(),
+         SET controlado_at = COALESCE(controlado_at, now()),
+             extinguido_at = now(),
              actualizado_en = now()
          WHERE incendio_uuid = $1
            AND eliminado_en IS NULL
-         RETURNING extinguido_at`,
+         RETURNING controlado_at, extinguido_at`,
         [incendio_uuid]
       )
       finalDate = rows?.[0]?.extinguido_at || null
@@ -482,6 +551,80 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
   } catch (e) { next(e) }
 })
 
+router.get('/estados', guardAuth, async (req, res, next) => {
+  try {
+    // ids=uuid1,uuid2,...
+    const raw = String(req.query.ids || '').trim()
+    if (!raw) return res.status(400).json({ code: 'BAD_REQUEST', message: 'Falta query param ids' })
+
+    // normaliza lista y valida UUIDs
+    const parts = Array.from(new Set(raw.split(',').map(s => s.trim()).filter(Boolean)))
+    try {
+      z.array(z.string().uuid()).min(1).max(500).parse(parts)
+    } catch {
+      return res.status(400).json({ code: 'BAD_REQUEST', message: 'ids debe contener UUIDs válidos (1..500)' })
+    }
+
+    // trae las marcas de tiempo de cierre en batch
+    const rows = await AppDataSource.query(
+      `SELECT incendio_uuid,
+              llegada_medios_terrestres_at,
+              llegada_medios_aereos_at,
+              controlado_at,
+              extinguido_at
+       FROM cierre_secuencia_control
+       WHERE incendio_uuid = ANY($1::uuid[])
+         AND eliminado_en IS NULL`,
+      [parts]
+    )
+
+    // indexa resultados
+    const byId: Record<string, {
+      estado: 'Pendiente' | 'En atención' | 'Controlado' | 'Extinguido',
+      secuencia_control: {
+        llegada_medios_terrestres_at: string | null,
+        llegada_medios_aereos_at: string | null,
+        controlado_at: string | null,
+        extinguido_at: string | null
+      }
+    }> = {}
+
+    for (const r of rows) {
+      const sc = {
+        llegada_medios_terrestres_at: r.llegada_medios_terrestres_at ? new Date(r.llegada_medios_terrestres_at).toISOString() : null,
+        llegada_medios_aereos_at:     r.llegada_medios_aereos_at     ? new Date(r.llegada_medios_aereos_at).toISOString()     : null,
+        controlado_at:                r.controlado_at                ? new Date(r.controlado_at).toISOString()                : null,
+        extinguido_at:                r.extinguido_at                ? new Date(r.extinguido_at).toISOString()                : null,
+      }
+      byId[r.incendio_uuid] = {
+        estado: estadoDesdeSecuencia(sc),
+        secuencia_control: sc
+      }
+    }
+
+    // para los que no tienen fila (no inicializado): estado = Pendiente
+    for (const id of parts) {
+      if (!byId[id]) {
+        byId[id] = {
+          estado: 'Pendiente',
+          secuencia_control: {
+            llegada_medios_terrestres_at: null,
+            llegada_medios_aereos_at: null,
+            controlado_at: null,
+            extinguido_at: null
+          }
+        }
+      }
+    }
+
+    // respuesta amigable: mapa + arreglo
+    const items = parts.map((id) => ({ incendio_uuid: id, ...byId[id] }))
+    return res.json({ total: items.length, items, byId })
+  } catch (e) { next(e) }
+})
+
+
+
 // ================== GET /:incendio_uuid ==================
 router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
   try {
@@ -496,7 +639,12 @@ router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
     if (!inc?.length) return res.status(404).json({ code: 'NOT_FOUND' })
 
     const [ops] = await AppDataSource.query(
-      `SELECT tipo_incendio_principal_id FROM cierre_operaciones WHERE incendio_uuid=$1 AND eliminado_en IS NULL`,
+      `SELECT o.tipo_incendio_principal_id,
+              t.nombre AS tipo_incendio_principal_nombre
+       FROM cierre_operaciones o
+       LEFT JOIN tipos_incendio t
+         ON t.tipo_incendio_id = o.tipo_incendio_principal_id
+       WHERE o.incendio_uuid=$1 AND o.eliminado_en IS NULL`,
       [incendio_uuid]
     )
     const [topo] = await AppDataSource.query(
@@ -520,7 +668,7 @@ router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
     const compTipo = await AppDataSource.query(
       `SELECT c.tipo_incendio_id, t.nombre AS tipo_incendio_nombre, c.pct::float
        FROM cierre_composicion_tipo c
-       JOIN tipos_incendio t ON t.tipo_incendio_id = c.tipo_incendio_id   -- 👈 ajuste aquí
+       JOIN tipos_incendio t ON t.tipo_incendio_id = c.tipo_incendio_id
        WHERE c.incendio_uuid=$1 AND c.eliminado_en IS NULL
        ORDER BY t.nombre ASC`,
       [incendio_uuid]
@@ -626,12 +774,32 @@ router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
       [incendio_uuid]
     )
 
+    // ---- calcular estado de cierre a partir de la secuencia ----
+    const estadoDesdeSecuencia = (sc?: {
+      llegada_medios_terrestres_at?: string | Date | null
+      llegada_medios_aereos_at?: string | Date | null
+      controlado_at?: string | Date | null
+      extinguido_at?: string | Date | null
+    }) => {
+      if (!sc) return 'Pendiente'
+      const { llegada_medios_terrestres_at, llegada_medios_aereos_at, controlado_at, extinguido_at } = sc
+      if (extinguido_at) return 'Extinguido'
+      if (controlado_at) return 'Controlado'
+      if (llegada_medios_terrestres_at || llegada_medios_aereos_at) return 'En atención'
+      return 'Pendiente'
+    }
+
     const cerrado = !!seq?.extinguido_at
+    const estado_cierre = estadoDesdeSecuencia(seq || undefined)
 
     return res.json({
       incendio_uuid,
       cerrado,
-      tipo_incendio_principal_id: ops?.tipo_incendio_principal_id ?? null,
+      estado_cierre, // 👈 nuevo campo calculado
+      tipo_incendio_principal: ops?.tipo_incendio_principal_id ? {
+        id: ops.tipo_incendio_principal_id,
+        nombre: ops.tipo_incendio_principal_nombre || null
+      } : null,
       composicion_tipo: compTipo,
       topografia: topo ?? null,
       propiedad,
@@ -655,13 +823,11 @@ router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
 })
 
 
-// Agrega esto en src/modules/cierre/cierre.routes.ts
 router.post('/init', guardAuth, async (req, res, next) => {
   try {
     const { incendio_uuid } = z.object({ incendio_uuid: z.string().uuid() }).parse(req.body)
     const user = (res.locals?.ctx?.user || {}) as { usuario_uuid?: string; is_admin?: boolean }
 
-    // validar incendio y permisos
     const inc = await getIncendioBasic(incendio_uuid)
     if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
@@ -669,17 +835,14 @@ router.post('/init', guardAuth, async (req, res, next) => {
       return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
     }
 
-    // ¿ya existía algún registro base?
     const existing = await AppDataSource.query(
       `SELECT 1 FROM cierre_operaciones WHERE incendio_uuid=$1 AND eliminado_en IS NULL`,
       [incendio_uuid]
     )
     const alreadyInitialized = !!existing?.length
 
-    // crea base (idempotente)
     await ensureBaseRecords(incendio_uuid)
 
-    // primera vez: deja huella en timeline
     if (!alreadyInitialized) {
       await AppDataSource.query(
         `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
@@ -707,16 +870,13 @@ router.post('/init', guardAuth, async (req, res, next) => {
   }
 })
 
-
 router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, next) => {
   try {
     const { incendio_uuid } = z.object({ incendio_uuid: z.string().uuid() }).parse(req.params)
     const user = (res.locals?.ctx?.user || {}) as { usuario_uuid?: string }
 
-    // asegura filas base
     await ensureBaseRecords(incendio_uuid)
 
-    // estado previo
     const prev = await AppDataSource.query(
       `SELECT extinguido_at
        FROM cierre_secuencia_control
@@ -725,12 +885,10 @@ router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, n
     )
     const wasClosed = !!prev?.[0]?.extinguido_at
 
-    // si ya estaba abierto, idempotente
     if (!wasClosed) {
       return res.json({ ok: true, reopened: false, message: 'Ya estaba abierto' })
     }
 
-    // abrir: set extinguido_at = NULL
     await AppDataSource.query(
       `UPDATE cierre_secuencia_control
        SET extinguido_at = NULL,
@@ -740,14 +898,12 @@ router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, n
       [incendio_uuid]
     )
 
-    // timeline
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1, 'CIERRE_ACTUALIZADO', 'Incendio reabierto para edición', $2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
 
-    // auditoría
     await auditRecord({
       tabla: 'cierre_secuencia_control',
       registro_uuid: incendio_uuid,
@@ -761,9 +917,7 @@ router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, n
   } catch (e) { next(e) }
 })
 
-
-
-// ---------- MEDIOS TERRESTRES (comp PK: incendio_uuid, medio_terrestre_id)
+// ---------- MEDIOS TERRESTRES
 router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, medio_terrestre_id} = z.object({
@@ -786,6 +940,15 @@ router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth,
       [cantidad, incendio_uuid, medio_terrestre_id]
     )
     if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+
+    // Autocompletar llegada de medios terrestres si estaba vacío
+    await AppDataSource.query(
+      `UPDATE cierre_secuencia_control
+       SET llegada_medios_terrestres_at = COALESCE(llegada_medios_terrestres_at, now()),
+           actualizado_en = now()
+       WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
+      [incendio_uuid]
+    )
 
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
@@ -826,7 +989,7 @@ router.delete('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth
   }catch(e){ next(e) }
 })
 
-// ---------- MEDIOS AÉREOS (pct)
+// ---------- MEDIOS AÉREOS
 router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, medio_aereo_id} = z.object({
@@ -849,6 +1012,15 @@ router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (
       [String(pct), incendio_uuid, medio_aereo_id]
     )
     if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+
+    // Autocompletar llegada de medios aéreos si estaba vacío
+    await AppDataSource.query(
+      `UPDATE cierre_secuencia_control
+       SET llegada_medios_aereos_at = COALESCE(llegada_medios_aereos_at, now()),
+           actualizado_en = now()
+       WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
+      [incendio_uuid]
+    )
 
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
@@ -889,7 +1061,7 @@ router.delete('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async 
   }catch(e){ next(e) }
 })
 
-// ---------- MEDIOS ACUÁTICOS (cantidad)
+// ---------- MEDIOS ACUÁTICOS
 router.patch('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, medio_acuatico_id} = z.object({
@@ -980,7 +1152,7 @@ router.delete('/:incendio_uuid/instituciones/:institucion_uuid', guardAuth, asyn
   }catch(e){ next(e) }
 })
 
-// ---------- ABASTOS (cantidad)
+// ---------- ABASTOS
 router.patch('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, abasto_id} = z.object({
@@ -1041,7 +1213,7 @@ router.delete('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req,res,ne
   }catch(e){ next(e) }
 })
 
-// ---------- PROPIEDAD (usado)
+// ---------- PROPIEDAD
 router.patch('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, tipo_propiedad_id} = z.object({
@@ -1102,7 +1274,7 @@ router.delete('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (
   }catch(e){ next(e) }
 })
 
-// ---------- TÉCNICAS (pct)
+// ---------- TÉCNICAS
 router.patch('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, tecnica} = z.object({
@@ -1163,7 +1335,7 @@ router.delete('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req,res,nex
   }catch(e){ next(e) }
 })
 
-// ---------- COMPOSICION TIPO (pct)
+// ---------- COMPOSICION TIPO
 router.patch('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, async (req,res,next)=>{
   try{
     const {incendio_uuid, tipo_incendio_id} = z.object({
@@ -1309,7 +1481,5 @@ router.delete('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req
     return res.json({ ok: true })
   } catch (e) { next(e) }
 })
-
-
 
 export default router
