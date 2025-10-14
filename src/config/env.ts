@@ -71,7 +71,7 @@ const DEFAULT_BASE = `http://localhost:${raw.PORT}`
 
 const env = {
   ...raw,
-  MEDIA_BASE_URL: raw.MEDIA_BASE_URL ?? DEFAULT_BASE, // ← queda siempre definida
+  MEDIA_BASE_URL: raw.MEDIA_BASE_URL ?? DEFAULT_BASE, 
   CORS_ALLOWED_ORIGINS_LIST: raw.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean),
 }
 
