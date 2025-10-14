@@ -1,3 +1,4 @@
+// config/env.ts
 import { z } from 'zod'
 import dotenv from 'dotenv'
 import dotenvExpand from 'dotenv-expand'
@@ -37,6 +38,8 @@ const schema = z.object({
 
   STORAGE_BUCKET_BASE_URL: z.string().url().optional(),
 
+  MEDIA_BASE_URL: z.string().url().optional(),
+
   FIRMS_ENABLED: z.coerce.boolean().default(true),
   FIRMS_API_KEY: z.string().min(1),
   FIRMS_COUNTRY: z.string().min(2).default('GTM'),
@@ -64,8 +67,11 @@ const schema = z.object({
 
 const raw = schema.parse(process.env)
 
+const DEFAULT_BASE = `http://localhost:${raw.PORT}`
+
 const env = {
   ...raw,
+  MEDIA_BASE_URL: raw.MEDIA_BASE_URL ?? DEFAULT_BASE, // ← queda siempre definida
   CORS_ALLOWED_ORIGINS_LIST: raw.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean),
 }
 

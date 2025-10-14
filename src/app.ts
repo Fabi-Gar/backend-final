@@ -4,6 +4,9 @@ import cors from 'cors'
 import pino from 'pino'
 import pinoHttp from 'pino-http'
 import rateLimit from 'express-rate-limit'
+import path from 'path'
+import fs from 'fs'
+
 import env from './config/env'
 import healthRoutes from './app/health.routes'
 import { notFound, onError } from './app/error'
@@ -25,7 +28,9 @@ import estadosIncendioRoutes from './app/estados-incendio.routes'
 import puntosCalorRoutes from './modules/geoespacial/puntos-calor.routes'
 import monitorRoutes from './app/monitor.routes'
 import departamentosRoutes from './modules/catalogos/entities/departamentos.routes'
-import cierreRoutes from './modules/cierre/cierre.routes'  
+import cierreRoutes from './modules/cierre/cierre.routes'
+
+import fotosReporteRoutes from './uploads/fotos-reporte.routes'
 
 const logger = pino({ level: env.LOG_LEVEL })
 const app = express()
@@ -54,13 +59,21 @@ app.use(rateLimit({
   legacyHeaders: false,
 }))
 
+const uploadsDir = path.join(process.cwd(), 'uploads')
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true })
+}
+app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
+
 app.use(contextMiddleware)
 app.use(authMiddleware)
 
+// ---------------- Rutas ----------------
 app.use(healthRoutes)
 app.use('/auth', authRoutes)
 app.use('/usuarios', usuariosRoutes)
 app.use('/incendios', incendiosRoutes)
+app.use('/reportes', fotosReporteRoutes);
 app.use('/reportes', reportesRoutes)
 app.use('/catalogos', catalogosRoutes)
 app.use('/roles', rolesRoutes)
@@ -72,12 +85,12 @@ app.use('/instituciones', institucionesRoutes)
 app.use('/puntos-calor', puntosCalorRoutes)
 app.use(estadosIncendioRoutes)
 
+
 app.get('/test-auth', (_req, res) => {
   res.json({ ok: true, user: res.locals.ctx?.user || null })
 })
 
 app.use(notFound)
 app.use(onError)
-
 
 export default app
