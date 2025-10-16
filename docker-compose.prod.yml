@@ -9,6 +9,8 @@ volumes:
   pg-backups:
   caddy-data:
   caddy-config:
+  redis-data:
+  uploads-data:      # <-- volumen persistente para archivos subidos
 
 services:
   pg:
@@ -22,11 +24,16 @@ services:
     volumes:
       - /opt/app-incendios/pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME} -h localhost"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-net
 
@@ -34,12 +41,19 @@ services:
     image: redis:7-alpine
     container_name: redis
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - /opt/app-incendios/redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-net
 
@@ -62,6 +76,11 @@ services:
     volumes:
       - /opt/app-incendios/pg-backups:/backups
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-net
 
@@ -89,9 +108,15 @@ services:
       # Secret heredado del .env
       JWT_SECRET: ${JWT_SECRET}
 
-      # 👇 MUY IMPORTANTE: que escuche en toda la interfaz
+      # Archivos locales (subidas)
+      MEDIA_DIR: /app/uploads        # <-- ruta interna donde la API escribirá/servirá
+      # Asegúrate en .env: MEDIA_BASE_URL=https://garmen.cloud
+
+      # Escuchar en todas las interfaces
       HOST: "0.0.0.0"
       PORT: "4000"
+    volumes:
+      - uploads-data:/app/uploads    # <-- volumen persistente para tus fotos/adjuntos
     depends_on:
       pg:
         condition: service_healthy
@@ -104,7 +129,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    stop_grace_period: 20s
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-net
     # No exponemos 4000 al host; Caddy hace proxy 80/443
@@ -123,5 +154,10 @@ services:
       api:
         condition: service_started
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - app-net
