@@ -4,27 +4,35 @@ import { z } from 'zod'
 import { AppDataSource } from '../../db/data-source'
 import { guardAuth, guardAdmin } from '../../middlewares/auth'
 import { auditRecord } from '../auditoria/auditoria.service'
+import {
+  notifyCierreEvento,
+  notifyCierreFinalizadoARegion,
+} from '../notificaciones/cierreNotify.service'
 
 const router = Router()
+
 // ================== UTIL: validadores simples ==================
 const patchCantidad = z.object({ cantidad: z.number().min(0) })
-const patchPct      = z.object({ pct: z.number().min(0) })
-const patchUsado    = z.object({ usado: z.boolean() })
+const patchPct = z.object({ pct: z.number().min(0) })
+const patchUsado = z.object({ usado: z.boolean() })
 
 // ================== SUPERFICIE_VEGETACION ==================
 const patchSupVegSchema = z.object({
   subtipo: z.string().nullable().optional(),
   area_ha: z.number().min(0).optional(),
-  ubicacion: z.enum(['DENTRO_AP','FUERA_AP']).optional(),
-  categoria: z.enum(['bosque_natural','plantacion_forestal','otra_vegetacion']).optional()
+  ubicacion: z.enum(['DENTRO_AP', 'FUERA_AP']).optional(),
+  categoria: z
+    .enum(['bosque_natural', 'plantacion_forestal', 'otra_vegetacion'])
+    .optional(),
 })
 
 // ----------------- helpers -----------------
-type CtxUser = { usuario_uuid?: string; is_admin?: boolean }
+type CtxUser = { usuario_uuid?: string; is_admin?: boolean; nombre?: string; apellido?: string }
 
 async function getIncendioBasic(uuid: string) {
   const rows = await AppDataSource.query(
-    `SELECT incendio_uuid, creado_por_uuid FROM incendios
+    `SELECT incendio_uuid, creado_por_uuid, titulo
+     FROM incendios
      WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
     [uuid]
   )
@@ -43,7 +51,6 @@ function estadoDesdeSecuencia(sc?: {
   if (sc.llegada_medios_terrestres_at || sc.llegada_medios_aereos_at) return 'En atención'
   return 'Pendiente'
 }
-
 
 async function isClosed(incendio_uuid: string) {
   const r = await AppDataSource.query(
@@ -92,52 +99,191 @@ async function ensureBaseRecords(incendio_uuid: string) {
   )
 }
 
+// --- Helpers para notificaciones ---
+function safeTitulo(t: any): string | undefined {
+  if (typeof t === 'string' && t.trim().length) return t
+  return undefined
+}
+
+function autorFromCtx(u?: CtxUser): string | undefined {
+  if (!u) return undefined
+  const parts = [u.nombre, u.apellido].filter(Boolean)
+  return parts.length ? parts.join(' ') : undefined
+}
+
+async function getNotifContext(incendio_uuid: string): Promise<{
+  incendioId: string
+  titulo?: string
+  creadorUserId: string
+  regionCode?: string
+  primerReportanteUserId?: string | null
+}> {
+  const [row] = await AppDataSource.query(
+    `
+    SELECT
+      i.incendio_uuid    AS id,
+      i.titulo           AS titulo,
+      i.creado_por_uuid  AS creador,
+      (
+        SELECT
+          COALESCE(d.departamento_uuid::text,'') || '|' || COALESCE(m.municipio_uuid::text,'')
+        FROM reportes r
+        LEFT JOIN departamentos d ON d.departamento_uuid = r.departamento_uuid
+        LEFT JOIN municipios   m  ON m.municipio_uuid   = r.municipio_uuid
+        WHERE r.incendio_uuid = i.incendio_uuid
+          AND r.eliminado_en IS NULL
+        ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC
+        LIMIT 1
+      ) AS region_code,
+      (
+        SELECT r2.reportado_por_uuid
+        FROM reportes r2
+        WHERE r2.incendio_uuid = i.incendio_uuid
+          AND r2.eliminado_en IS NULL
+        ORDER BY r2.reportado_en ASC NULLS LAST, r2.creado_en ASC
+        LIMIT 1
+      ) AS primer_reportante
+    FROM incendios i
+    WHERE i.incendio_uuid = $1
+      AND i.eliminado_en IS NULL
+    LIMIT 1
+    `,
+    [incendio_uuid]
+  )
+
+  return {
+    incendioId: String(row?.id || incendio_uuid),
+    titulo: typeof row?.titulo === 'string' && row.titulo.trim() ? row.titulo : undefined,
+    creadorUserId: String(row?.creador),
+    regionCode: row?.region_code ? String(row.region_code) : undefined,
+    primerReportanteUserId: row?.primer_reportante ? String(row.primer_reportante) : null,
+  }
+}
+
+
+async function notifyCierreActualizado(
+  incendio_uuid: string,
+  autorNombre?: string,
+  resumen?: string
+) {
+  const ctx = await getNotifContext(incendio_uuid)
+  await notifyCierreEvento({
+    type: 'cierre_actualizado',
+    incendio: {
+      id: ctx.incendioId,
+      titulo: ctx.titulo,
+      creadorUserId: ctx.creadorUserId,
+    },
+    autorNombre,
+    resumen,
+    primerReportanteUserId: ctx.primerReportanteUserId ?? null,
+  })
+}
+
 // ----------------- zod schemas -----------------
 const payloadSchema = z.object({
   tipo_incendio_principal_id: z.string().optional(),
-  composicion_tipo: z.array(z.object({ tipo_incendio_id: z.string(), pct: z.number().min(0) })).optional(),
-  topografia: z.object({
-    plano_pct: z.number().min(0).optional(),
-    ondulado_pct: z.number().min(0).optional(),
-    quebrado_pct: z.number().min(0).optional()
-  }).optional(),
-  propiedad: z.array(z.object({ tipo_propiedad_id: z.string(), usado: z.boolean().optional().default(true) })).optional(),
-  iniciado_junto_a: z.object({ iniciado_id: z.string(), otro_texto: z.string().optional().nullable() }).optional(),
-  secuencia_control: z.object({
-    llegada_medios_terrestres_at: z.coerce.date().nullable().optional(),
-    llegada_medios_aereos_at: z.coerce.date().nullable().optional(),
-    controlado_at: z.coerce.date().nullable().optional(),
-    extinguido_at: z.coerce.date().nullable().optional()
-  }).optional(),
-  superficie: z.object({
-    area_total_ha: z.number().min(0).optional(),
-    dentro_ap_ha: z.number().min(0).optional(),
-    fuera_ap_ha: z.number().min(0).optional(),
-    nombre_ap: z.string().optional().nullable()
-  }).optional(),
-  superficie_vegetacion: z.array(z.object({
-    ubicacion: z.enum(['DENTRO_AP','FUERA_AP']),
-    categoria: z.enum(['bosque_natural','plantacion_forestal','otra_vegetacion']),
-    subtipo: z.string().optional().nullable(),
-    area_ha: z.number().min(0)
-  })).optional(),
-  tecnicas: z.array(z.object({
-    tecnica: z.enum(['directo','indirecto','control_natural']),
-    pct: z.number().min(0)
-  })).optional(),
-  medios_terrestres: z.array(z.object({ medio_terrestre_id: z.string(), cantidad: z.number().min(0).default(1) })).optional(),
-  medios_aereos:    z.array(z.object({ medio_aereo_id: z.string(), pct: z.number().min(0) })).optional(),
-  medios_acuaticos: z.array(z.object({ medio_acuatico_id: z.string(), cantidad: z.number().min(0).default(1) })).optional(),
-  medios_instituciones: z.array(z.object({ institucion_uuid: z.string().uuid() })).optional(),
-  abastos: z.array(z.object({ abasto_id: z.string(), cantidad: z.number().min(0).default(0) })).optional(),
-  causa: z.object({ causa_id: z.string(), otro_texto: z.string().optional().nullable() }).optional(),
-  meteo: z.object({
-    temp_c: z.number().nullable().optional(),
-    hr_pct: z.number().nullable().optional(),
-    viento_vel: z.number().nullable().optional(),
-    viento_dir: z.string().nullable().optional()
-  }).optional(),
-  nota: z.string().max(500).optional()
+  composicion_tipo: z
+    .array(z.object({ tipo_incendio_id: z.string(), pct: z.number().min(0) }))
+    .optional(),
+  topografia: z
+    .object({
+      plano_pct: z.number().min(0).optional(),
+      ondulado_pct: z.number().min(0).optional(),
+      quebrado_pct: z.number().min(0).optional(),
+    })
+    .optional(),
+  propiedad: z
+    .array(
+      z.object({
+        tipo_propiedad_id: z.string(),
+        usado: z.boolean().optional().default(true),
+      })
+    )
+    .optional(),
+  iniciado_junto_a: z
+    .object({
+      iniciado_id: z.string(),
+      otro_texto: z.string().optional().nullable(),
+    })
+    .optional(),
+  secuencia_control: z
+    .object({
+      llegada_medios_terrestres_at: z.coerce.date().nullable().optional(),
+      llegada_medios_aereos_at: z.coerce.date().nullable().optional(),
+      controlado_at: z.coerce.date().nullable().optional(),
+      extinguido_at: z.coerce.date().nullable().optional(),
+    })
+    .optional(),
+  superficie: z
+    .object({
+      area_total_ha: z.number().min(0).optional(),
+      dentro_ap_ha: z.number().min(0).optional(),
+      fuera_ap_ha: z.number().min(0).optional(),
+      nombre_ap: z.string().optional().nullable(),
+    })
+    .optional(),
+  superficie_vegetacion: z
+    .array(
+      z.object({
+        ubicacion: z.enum(['DENTRO_AP', 'FUERA_AP']),
+        categoria: z.enum([
+          'bosque_natural',
+          'plantacion_forestal',
+          'otra_vegetacion',
+        ]),
+        subtipo: z.string().optional().nullable(),
+        area_ha: z.number().min(0),
+      })
+    )
+    .optional(),
+  tecnicas: z
+    .array(
+      z.object({
+        tecnica: z.enum(['directo', 'indirecto', 'control_natural']),
+        pct: z.number().min(0),
+      })
+    )
+    .optional(),
+  medios_terrestres: z
+    .array(
+      z.object({
+        medio_terrestre_id: z.string(),
+        cantidad: z.number().min(0).default(1),
+      })
+    )
+    .optional(),
+  medios_aereos: z
+    .array(
+      z.object({ medio_aereo_id: z.string(), pct: z.number().min(0) })
+    )
+    .optional(),
+  medios_acuaticos: z
+    .array(
+      z.object({
+        medio_acuatico_id: z.string(),
+        cantidad: z.number().min(0).default(1),
+      })
+    )
+    .optional(),
+  medios_instituciones: z
+    .array(z.object({ institucion_uuid: z.string().uuid() }))
+    .optional(),
+  abastos: z
+    .array(z.object({ abasto_id: z.string(), cantidad: z.number().min(0).default(0) }))
+    .optional(),
+  causa: z
+    .object({ causa_id: z.string(), otro_texto: z.string().optional().nullable() })
+    .optional(),
+  meteo: z
+    .object({
+      temp_c: z.number().nullable().optional(),
+      hr_pct: z.number().nullable().optional(),
+      viento_vel: z.number().nullable().optional(),
+      viento_dir: z.string().nullable().optional(),
+    })
+    .optional(),
+  nota: z.string().max(500).optional(),
 })
 
 // ================== PATCH /:incendio_uuid/catalogos ==================
@@ -446,60 +592,60 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
         accion: 'UPDATE',
         antes: null,
         despues: auditAfter,
-        ctx: res.locals.ctx
+        ctx: res.locals.ctx,
       })
     }
 
+    // 🔔 Notificación: Cierre actualizado (si hubo algo)
+    if (updatesFeed.length) {
+      await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), updatesFeed[0])
+    }
+
     return res.json({ ok: true })
-} catch (e: any) {
-  // Zod / validación
-  if (e?.issues) {
-    return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues })
+  } catch (e: any) {
+    // Zod / validación
+    if (e?.issues) {
+      return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues })
+    }
+
+    // TypeORM / PG
+    const d = e?.driverError ?? e
+    if (d?.code) {
+      const base = {
+        code: 'DB_ERROR',
+        pg_code: d.code,
+        table: d.table ?? null,
+        constraint: d.constraint ?? null,
+        detail: d.detail ?? null,
+        hint: d.hint ?? null,
+        traceId: res.locals?.ctx?.requestId ?? null,
+      }
+
+      if (d.code === '23503') {
+        return res.status(422).json({
+          ...base,
+          message: 'Violación de llave foránea: algún id de catálogo no existe.',
+        })
+      }
+      if (d.code === '23505') {
+        return res.status(409).json({ ...base, message: 'Registro duplicado (unique_violation).' })
+      }
+      if (d.code === '23502') {
+        return res.status(400).json({ ...base, message: 'Campo requerido es NULL (not_null_violation).' })
+      }
+
+      return res.status(400).json({ ...base, message: 'Error de base de datos.' })
+    }
+
+    return next(e)
   }
-
-  // TypeORM / PG
-  const d = e?.driverError ?? e
-  if (d?.code) {
-    // Mapeo de mensajes amigables por constraint (ajusta nombres reales)
-    const friendlyByConstraint: Record<string, string> = {
-    }
-
-    const base = {
-      code: 'DB_ERROR',
-      pg_code: d.code,
-      table: d.table ?? null,
-      constraint: d.constraint ?? null,
-      detail: d.detail ?? null,
-      hint: d.hint ?? null,
-      traceId: res.locals?.ctx?.requestId ?? null,
-    }
-
-    if (d.code === '23503') {
-      const friendly =
-        (d.constraint && friendlyByConstraint[d.constraint]) ||
-        'Violación de llave foránea: algún id de catálogo no existe.'
-      return res.status(422).json({ ...base, message: friendly })
-    }
-    if (d.code === '23505') {
-      return res.status(409).json({ ...base, message: 'Registro duplicado (unique_violation).' })
-    }
-    if (d.code === '23502') {
-      return res.status(400).json({ ...base, message: 'Campo requerido es NULL (not_null_violation).' })
-    }
-
-    return res.status(400).json({ ...base, message: 'Error de base de datos.' })
-  }
-
-  return next(e)
-}
-
 })
 
 // ================== POST /:incendio_uuid/finalizar ==================
-router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res, next) => {
+router.post('/:incendio_uuid/finalizar', guardAuth, async (req, res, next) => {
   try {
     const { incendio_uuid } = z.object({ incendio_uuid: z.string().uuid() }).parse(req.params)
-    const user = (res.locals?.ctx?.user || {}) as { usuario_uuid?: string }
+    const user = (res.locals?.ctx?.user || {}) as CtxUser
 
     await ensureBaseRecords(incendio_uuid)
 
@@ -543,21 +689,45 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
         accion: 'UPDATE',
         antes: { extinguido_at: null },
         despues: { extinguido_at: finalDate },
-        ctx: res.locals.ctx
+        ctx: res.locals.ctx,
       })
+
+      // 🔔 Notificaciones (finalizado)
+      const ctx = await getNotifContext(incendio_uuid)
+      await notifyCierreEvento({
+        type: 'cierre_finalizado',
+        incendio: {
+          id: ctx.incendioId,
+          titulo: ctx.titulo,
+          creadorUserId: ctx.creadorUserId,
+        },
+        autorNombre: autorFromCtx(user),
+        resumen: 'Incendio cerrado (extinguido)',
+        primerReportanteUserId: ctx.primerReportanteUserId ?? null,
+      })
+      if (ctx.regionCode) {
+        await notifyCierreFinalizadoARegion({
+          incendio: {
+            id: ctx.incendioId,
+            titulo: ctx.titulo,
+            regionCode: ctx.regionCode,
+          },
+        })
+      }
     }
 
     return res.json({ ok: true, extinguido_at: finalDate, alreadyClosed })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 })
 
+// ================== GET /estados (batch) ==================
 router.get('/estados', guardAuth, async (req, res, next) => {
   try {
-    // ids=uuid1,uuid2,...
     const raw = String(req.query.ids || '').trim()
     if (!raw) return res.status(400).json({ code: 'BAD_REQUEST', message: 'Falta query param ids' })
 
-    // normaliza lista y valida UUIDs
     const parts = Array.from(new Set(raw.split(',').map(s => s.trim()).filter(Boolean)))
     try {
       z.array(z.string().uuid()).min(1).max(500).parse(parts)
@@ -565,7 +735,6 @@ router.get('/estados', guardAuth, async (req, res, next) => {
       return res.status(400).json({ code: 'BAD_REQUEST', message: 'ids debe contener UUIDs válidos (1..500)' })
     }
 
-    // trae las marcas de tiempo de cierre en batch
     const rows = await AppDataSource.query(
       `SELECT incendio_uuid,
               llegada_medios_terrestres_at,
@@ -578,31 +747,36 @@ router.get('/estados', guardAuth, async (req, res, next) => {
       [parts]
     )
 
-    // indexa resultados
-    const byId: Record<string, {
-      estado: 'Pendiente' | 'En atención' | 'Controlado' | 'Extinguido',
-      secuencia_control: {
-        llegada_medios_terrestres_at: string | null,
-        llegada_medios_aereos_at: string | null,
-        controlado_at: string | null,
-        extinguido_at: string | null
+    const byId: Record<
+      string,
+      {
+        estado: 'Pendiente' | 'En atención' | 'Controlado' | 'Extinguido'
+        secuencia_control: {
+          llegada_medios_terrestres_at: string | null
+          llegada_medios_aereos_at: string | null
+          controlado_at: string | null
+          extinguido_at: string | null
+        }
       }
-    }> = {}
+    > = {}
 
     for (const r of rows) {
       const sc = {
-        llegada_medios_terrestres_at: r.llegada_medios_terrestres_at ? new Date(r.llegada_medios_terrestres_at).toISOString() : null,
-        llegada_medios_aereos_at:     r.llegada_medios_aereos_at     ? new Date(r.llegada_medios_aereos_at).toISOString()     : null,
-        controlado_at:                r.controlado_at                ? new Date(r.controlado_at).toISOString()                : null,
-        extinguido_at:                r.extinguido_at                ? new Date(r.extinguido_at).toISOString()                : null,
+        llegada_medios_terrestres_at: r.llegada_medios_terrestres_at
+          ? new Date(r.llegada_medios_terrestres_at).toISOString()
+          : null,
+        llegada_medios_aereos_at: r.llegada_medios_aereos_at
+          ? new Date(r.llegada_medios_aereos_at).toISOString()
+          : null,
+        controlado_at: r.controlado_at ? new Date(r.controlado_at).toISOString() : null,
+        extinguido_at: r.extinguido_at ? new Date(r.extinguido_at).toISOString() : null,
       }
       byId[r.incendio_uuid] = {
         estado: estadoDesdeSecuencia(sc),
-        secuencia_control: sc
+        secuencia_control: sc,
       }
     }
 
-    // para los que no tienen fila (no inicializado): estado = Pendiente
     for (const id of parts) {
       if (!byId[id]) {
         byId[id] = {
@@ -611,19 +785,18 @@ router.get('/estados', guardAuth, async (req, res, next) => {
             llegada_medios_terrestres_at: null,
             llegada_medios_aereos_at: null,
             controlado_at: null,
-            extinguido_at: null
-          }
+            extinguido_at: null,
+          },
         }
       }
     }
 
-    // respuesta amigable: mapa + arreglo
-    const items = parts.map((id) => ({ incendio_uuid: id, ...byId[id] }))
+    const items = parts.map(id => ({ incendio_uuid: id, ...byId[id] }))
     return res.json({ total: items.length, items, byId })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 })
-
-
 
 // ================== GET /:incendio_uuid ==================
 router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
@@ -774,32 +947,19 @@ router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
       [incendio_uuid]
     )
 
-    // ---- calcular estado de cierre a partir de la secuencia ----
-    const estadoDesdeSecuencia = (sc?: {
-      llegada_medios_terrestres_at?: string | Date | null
-      llegada_medios_aereos_at?: string | Date | null
-      controlado_at?: string | Date | null
-      extinguido_at?: string | Date | null
-    }) => {
-      if (!sc) return 'Pendiente'
-      const { llegada_medios_terrestres_at, llegada_medios_aereos_at, controlado_at, extinguido_at } = sc
-      if (extinguido_at) return 'Extinguido'
-      if (controlado_at) return 'Controlado'
-      if (llegada_medios_terrestres_at || llegada_medios_aereos_at) return 'En atención'
-      return 'Pendiente'
-    }
-
-    const cerrado = !!seq?.extinguido_at
     const estado_cierre = estadoDesdeSecuencia(seq || undefined)
+    const cerrado = !!seq?.extinguido_at
 
     return res.json({
       incendio_uuid,
       cerrado,
-      estado_cierre, // 👈 nuevo campo calculado
-      tipo_incendio_principal: ops?.tipo_incendio_principal_id ? {
-        id: ops.tipo_incendio_principal_id,
-        nombre: ops.tipo_incendio_principal_nombre || null
-      } : null,
+      estado_cierre,
+      tipo_incendio_principal: ops?.tipo_incendio_principal_id
+        ? {
+            id: ops.tipo_incendio_principal_id,
+            nombre: ops.tipo_incendio_principal_nombre || null,
+          }
+        : null,
       composicion_tipo: compTipo,
       topografia: topo ?? null,
       propiedad,
@@ -812,21 +972,23 @@ router.get('/:incendio_uuid', guardAuth, async (req, res, next) => {
         terrestres: mediosTer,
         aereos: mediosAer,
         acuaticos: mediosAcu,
-        instituciones: mediosInst
+        instituciones: mediosInst,
       },
       abastos,
       causa: causa ?? null,
       meteo: meteo ?? null,
-      updates
+      updates,
     })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 })
 
-
+// ================== POST /init ==================
 router.post('/init', guardAuth, async (req, res, next) => {
   try {
     const { incendio_uuid } = z.object({ incendio_uuid: z.string().uuid() }).parse(req.body)
-    const user = (res.locals?.ctx?.user || {}) as { usuario_uuid?: string; is_admin?: boolean }
+    const user = (res.locals?.ctx?.user || {}) as CtxUser
 
     const inc = await getIncendioBasic(incendio_uuid)
     if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
@@ -855,14 +1017,28 @@ router.post('/init', guardAuth, async (req, res, next) => {
         accion: 'INSERT',
         antes: null,
         despues: { incendio_uuid },
-        ctx: res.locals.ctx
+        ctx: res.locals.ctx,
+      })
+
+      // 🔔 Notificación: Cierre iniciado
+      const ctx = await getNotifContext(incendio_uuid)
+      await notifyCierreEvento({
+        type: 'cierre_iniciado',
+        incendio: {
+          id: ctx.incendioId,
+          titulo: ctx.titulo,
+          creadorUserId: ctx.creadorUserId,
+        },
+        autorNombre: autorFromCtx(user),
+        resumen: 'Se inició el cierre del incendio',
+        primerReportanteUserId: ctx.primerReportanteUserId ?? null,
       })
     }
 
     return res.status(201).json({
       ok: true,
       incendio_uuid,
-      alreadyInitialized
+      alreadyInitialized,
     })
   } catch (e: any) {
     if (e?.issues) return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues })
@@ -873,7 +1049,7 @@ router.post('/init', guardAuth, async (req, res, next) => {
 router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, next) => {
   try {
     const { incendio_uuid } = z.object({ incendio_uuid: z.string().uuid() }).parse(req.params)
-    const user = (res.locals?.ctx?.user || {}) as { usuario_uuid?: string }
+    const user = (res.locals?.ctx?.user || {}) as CtxUser
 
     await ensureBaseRecords(incendio_uuid)
 
@@ -910,27 +1086,44 @@ router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, n
       accion: 'UPDATE',
       antes: { extinguido_at: prev?.[0]?.extinguido_at },
       despues: { extinguido_at: null },
-      ctx: res.locals.ctx
+      ctx: res.locals.ctx,
+    })
+
+    // 🔔 Notificación: Cierre reabierto
+    const ctx = await getNotifContext(incendio_uuid)
+    await notifyCierreEvento({
+      type: 'cierre_reabierto',
+      incendio: {
+        id: ctx.incendioId,
+        titulo: ctx.titulo,
+        creadorUserId: ctx.creadorUserId,
+      },
+      autorNombre: autorFromCtx(user),
+      resumen: 'Incendio reabierto para edición',
+      primerReportanteUserId: ctx.primerReportanteUserId ?? null,
     })
 
     return res.json({ ok: true, reopened: true })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 })
 
 // ---------- MEDIOS TERRESTRES
-router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, medio_terrestre_id} = z.object({
+router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, medio_terrestre_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      medio_terrestre_id: z.string()
+      medio_terrestre_id: z.string(),
     }).parse(req.params)
     const { cantidad } = patchCantidad.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_terrestres
@@ -939,7 +1132,7 @@ router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth,
        RETURNING medio_terrestre_id`,
       [cantidad, incendio_uuid, medio_terrestre_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
 
     // Autocompletar llegada de medios terrestres si estaba vacío
     await AppDataSource.query(
@@ -955,21 +1148,27 @@ router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth,
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio terrestre actualizado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio terrestre actualizado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, medio_terrestre_id} = z.object({
+
+router.delete('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, medio_terrestre_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      medio_terrestre_id: z.string()
+      medio_terrestre_id: z.string(),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_terrestres
@@ -978,31 +1177,36 @@ router.delete('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth
        RETURNING medio_terrestre_id`,
       [incendio_uuid, medio_terrestre_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
 
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio terrestre eliminado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio terrestre eliminado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- MEDIOS AÉREOS
-router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, medio_aereo_id} = z.object({
+router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, medio_aereo_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      medio_aereo_id: z.string()
+      medio_aereo_id: z.string(),
     }).parse(req.params)
     const { pct } = patchPct.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_aereos
@@ -1011,7 +1215,7 @@ router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (
        RETURNING medio_aereo_id`,
       [String(pct), incendio_uuid, medio_aereo_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
 
     // Autocompletar llegada de medios aéreos si estaba vacío
     await AppDataSource.query(
@@ -1027,21 +1231,27 @@ router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio aéreo actualizado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio aéreo actualizado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, medio_aereo_id} = z.object({
+
+router.delete('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, medio_aereo_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      medio_aereo_id: z.string()
+      medio_aereo_id: z.string(),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_aereos
@@ -1050,31 +1260,36 @@ router.delete('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async 
        RETURNING medio_aereo_id`,
       [incendio_uuid, medio_aereo_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
 
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio aéreo eliminado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio aéreo eliminado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- MEDIOS ACUÁTICOS
-router.patch('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, medio_acuatico_id} = z.object({
+router.patch('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, medio_acuatico_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      medio_acuatico_id: z.string()
+      medio_acuatico_id: z.string(),
     }).parse(req.params)
     const { cantidad } = patchCantidad.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_acuaticos
@@ -1083,26 +1298,34 @@ router.patch('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, a
        RETURNING medio_acuatico_id`,
       [cantidad, incendio_uuid, medio_acuatico_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio acuático actualizado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio acuático actualizado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, medio_acuatico_id} = z.object({
+
+router.delete('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, medio_acuatico_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      medio_acuatico_id: z.string()
+      medio_acuatico_id: z.string(),
     }).parse(req.params)
+
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_acuaticos
@@ -1111,29 +1334,35 @@ router.delete('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, 
        RETURNING medio_acuatico_id`,
       [incendio_uuid, medio_acuatico_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio acuático eliminado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio acuático eliminado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- INSTITUCIONES
-router.delete('/:incendio_uuid/instituciones/:institucion_uuid', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, institucion_uuid} = z.object({
+router.delete('/:incendio_uuid/instituciones/:institucion_uuid', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, institucion_uuid } = z.object({
       incendio_uuid: z.string().uuid(),
-      institucion_uuid: z.string().uuid()
+      institucion_uuid: z.string().uuid(),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_medios_instituciones
@@ -1142,30 +1371,36 @@ router.delete('/:incendio_uuid/instituciones/:institucion_uuid', guardAuth, asyn
        RETURNING institucion_uuid`,
       [incendio_uuid, institucion_uuid]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Institución eliminada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Institución eliminada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- ABASTOS
-router.patch('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, abasto_id} = z.object({
+router.patch('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, abasto_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      abasto_id: z.string()
+      abasto_id: z.string(),
     }).parse(req.params)
     const { cantidad } = patchCantidad.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_abastos
@@ -1174,27 +1409,34 @@ router.patch('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req,res,nex
        RETURNING abasto_id`,
       [cantidad, incendio_uuid, abasto_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Abasto actualizado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Abasto actualizado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, abasto_id} = z.object({
+
+router.delete('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, abasto_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      abasto_id: z.string()
+      abasto_id: z.string(),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_abastos
@@ -1203,30 +1445,36 @@ router.delete('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req,res,ne
        RETURNING abasto_id`,
       [incendio_uuid, abasto_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Abasto eliminado',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Abasto eliminado')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- PROPIEDAD
-router.patch('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, tipo_propiedad_id} = z.object({
+router.patch('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, tipo_propiedad_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      tipo_propiedad_id: z.string()
+      tipo_propiedad_id: z.string(),
     }).parse(req.params)
     const { usado } = patchUsado.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_propiedad
@@ -1235,27 +1483,34 @@ router.patch('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (r
        RETURNING tipo_propiedad_id`,
       [usado, incendio_uuid, tipo_propiedad_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Propiedad actualizada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Propiedad actualizada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, tipo_propiedad_id} = z.object({
+
+router.delete('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, tipo_propiedad_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      tipo_propiedad_id: z.string()
+      tipo_propiedad_id: z.string(),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_propiedad
@@ -1264,30 +1519,36 @@ router.delete('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (
        RETURNING tipo_propiedad_id`,
       [incendio_uuid, tipo_propiedad_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Propiedad eliminada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Propiedad eliminada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- TÉCNICAS
-router.patch('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, tecnica} = z.object({
+router.patch('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, tecnica } = z.object({
       incendio_uuid: z.string().uuid(),
-      tecnica: z.enum(['directo','indirecto','control_natural'])
+      tecnica: z.enum(['directo', 'indirecto', 'control_natural']),
     }).parse(req.params)
     const { pct } = patchPct.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_tecnicas_extincion
@@ -1296,27 +1557,34 @@ router.patch('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req,res,next
        RETURNING tecnica`,
       [String(pct), incendio_uuid, tecnica]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Técnica de extinción actualizada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Técnica de extinción actualizada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, tecnica} = z.object({
+
+router.delete('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, tecnica } = z.object({
       incendio_uuid: z.string().uuid(),
-      tecnica: z.enum(['directo','indirecto','control_natural'])
+      tecnica: z.enum(['directo', 'indirecto', 'control_natural']),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_tecnicas_extincion
@@ -1325,30 +1593,36 @@ router.delete('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req,res,nex
        RETURNING tecnica`,
       [incendio_uuid, tecnica]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Técnica de extinción eliminada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Técnica de extinción eliminada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // ---------- COMPOSICION TIPO
-router.patch('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, tipo_incendio_id} = z.object({
+router.patch('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, tipo_incendio_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      tipo_incendio_id: z.string()
+      tipo_incendio_id: z.string(),
     }).parse(req.params)
     const { pct } = patchPct.parse(req.body)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_composicion_tipo
@@ -1357,27 +1631,33 @@ router.patch('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, as
        RETURNING tipo_incendio_id`,
       [String(pct), incendio_uuid, tipo_incendio_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Composición por tipo actualizada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Composición por tipo actualizada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
-router.delete('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, async (req,res,next)=>{
-  try{
-    const {incendio_uuid, tipo_incendio_id} = z.object({
+router.delete('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, async (req, res, next) => {
+  try {
+    const { incendio_uuid, tipo_incendio_id } = z.object({
       incendio_uuid: z.string().uuid(),
-      tipo_incendio_id: z.string()
+      tipo_incendio_id: z.string(),
     }).parse(req.params)
 
     const inc = await getIncendioBasic(incendio_uuid)
-    if(!inc) return res.status(404).json({code:'NOT_FOUND'})
+    if (!inc) return res.status(404).json({ code: 'NOT_FOUND' })
     const closed = await isClosed(incendio_uuid)
     const user = (res.locals?.ctx?.user || {}) as CtxUser
-    if(!canEdit(user, inc.creado_por_uuid, closed)) return res.status(403).json({code: closed?'CERRADO_SOLO_ADMIN':'PERMISSION_DENIED'})
+    if (!canEdit(user, inc.creado_por_uuid, closed))
+      return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' })
 
     const rows = await AppDataSource.query(
       `UPDATE cierre_composicion_tipo
@@ -1386,14 +1666,19 @@ router.delete('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, a
        RETURNING tipo_incendio_id`,
       [incendio_uuid, tipo_incendio_id]
     )
-    if(!rows.length) return res.status(404).json({code:'NOT_FOUND'})
+    if (!rows.length) return res.status(404).json({ code: 'NOT_FOUND' })
+
     await AppDataSource.query(
       `INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Composición por tipo eliminada',$2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
-    res.json({ok:true})
-  }catch(e){ next(e) }
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Composición por tipo eliminada')
+
+    res.json({ ok: true })
+  } catch (e) { next(e) }
 })
 
 // PATCH /cierre/:incendio_uuid/superficie-vegetacion/:id
@@ -1401,7 +1686,7 @@ router.patch('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req,
   try {
     const { incendio_uuid, id } = z.object({
       incendio_uuid: z.string().uuid(),
-      id: z.string().uuid()
+      id: z.string().uuid(),
     }).parse({ ...req.params })
     const body = patchSupVegSchema.parse(req.body)
 
@@ -1417,7 +1702,7 @@ router.patch('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req,
     const vals: any[] = []
     let i = 1
     if (body.subtipo !== undefined) { sets.push(`subtipo = $${i++}`); vals.push(body.subtipo) }
-    if (body.area_ha  !== undefined) { sets.push(`area_ha = $${i++}`); vals.push(String(body.area_ha)) }
+    if (body.area_ha !== undefined) { sets.push(`area_ha = $${i++}`); vals.push(String(body.area_ha)) }
     if (body.ubicacion !== undefined) { sets.push(`ubicacion = $${i++}`); vals.push(body.ubicacion) }
     if (body.categoria !== undefined) { sets.push(`categoria = $${i++}`); vals.push(body.categoria) }
     sets.push(`actualizado_en = now()`)
@@ -1441,6 +1726,9 @@ router.patch('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
 
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Superficie de vegetación actualizada')
+
     return res.json({ ok: true, id })
   } catch (e) { next(e) }
 })
@@ -1450,7 +1738,7 @@ router.delete('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req
   try {
     const { incendio_uuid, id } = z.object({
       incendio_uuid: z.string().uuid(),
-      id: z.string().uuid()
+      id: z.string().uuid(),
     }).parse({ ...req.params })
 
     const inc = await getIncendioBasic(incendio_uuid)
@@ -1477,6 +1765,9 @@ router.delete('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req
        VALUES ($1, 'CIERRE_ACTUALIZADO', 'Superficie de vegetación eliminada', $2)`,
       [incendio_uuid, user?.usuario_uuid ?? null]
     )
+
+    // 🔔 Notificación
+    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Superficie de vegetación eliminada')
 
     return res.json({ ok: true })
   } catch (e) { next(e) }

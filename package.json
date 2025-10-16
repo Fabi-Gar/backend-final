@@ -16,7 +16,7 @@
     "migration:run": "npm run typeorm:dist -- migration:run",
     "migration:revert": "npm run typeorm:dist -- migration:revert",
     "migration:show": "npm run typeorm:dist -- migration:show",
-    "seed:dist": "node dist/db/seeds/171004_seed_inicial.js",
+    "seed:dist": "node dcist/db/seeds/171004_seed_inicial.js",
     "seed": "tsx src/db/seeds/171004_seed_inicial.ts",
     "lint": "echo 'lint placeholder'",
     "format": "echo 'format placeholder'"
@@ -52,6 +52,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/multer": "^2.0.0",
     "@types/node": "^24.6.2",
+    "@types/node-fetch": "^2.6.13",
     "@types/pino": "^7.0.4",
     "@types/pino-http": "^5.8.4",
     "cross-env": "^10.1.0",

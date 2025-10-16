@@ -1,36 +1,4 @@
-# Reemplaza por tu dominio
-api.tudominio.com {
-  encode zstd gzip
-
-  @api path /health/* /incendios* /reportes* /uploads* /catalogos* /cierre* /auth* /sse*
-
-  reverse_proxy @api api:4000 {
-    health_uri /health/liveness
-    header_up X-Forwarded-Proto {scheme}
-    header_up Host {host}
-  }
-
-  # CORS (ajústalo según tus orígenes)
-  header {
-    Access-Control-Allow-Origin "https://tu-frontend.com"
-    Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    Access-Control-Allow-Headers "Content-Type, Authorization"
-    Access-Control-Allow-Credentials true
-  }
-
-  # Seguridad básica
-  header {
-    X-Content-Type-Options "nosniff"
-    X-Frame-Options "DENY"
-    Referrer-Policy "strict-origin-when-cross-origin"
-  }
-
-  tls {
-    # Caddy emitirá/renovará automáticamente los certificados (Let's Encrypt)
-  }
-
-  log {
-    output stdout
-    format console
-  }
+garmen.cloud {
+  encode gzip
+  reverse_proxy api:4000
 }

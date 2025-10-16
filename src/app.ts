@@ -15,7 +15,10 @@ import { notFound, onError } from './app/error'
 import { contextMiddleware } from './middlewares/context'
 import { authMiddleware } from './middlewares/auth'
 
+
 // Módulos
+import testPushRoutes from '../src/modules/notificaciones/testpush.routes'
+import { pushRouter } from './modules/notificaciones/push.routes'
 import firmsRoutes from './modules/geoespacial/firms.routes'
 import authRoutes from './modules/auth/auth.routes'
 import usuariosRoutes from './modules/seguridad/usuarios.routes'
@@ -71,6 +74,8 @@ app.use(authMiddleware)
 // ---------------- Rutas ----------------
 app.use(healthRoutes)
 app.use('/auth', authRoutes)
+app.use('/push', pushRouter)
+app.use('/test', testPushRoutes);
 app.use('/usuarios', usuariosRoutes)
 app.use('/incendios', incendiosRoutes)
 app.use('/reportes', fotosReporteRoutes);
