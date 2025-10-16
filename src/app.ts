@@ -15,9 +15,7 @@ import { notFound, onError } from './app/error'
 import { contextMiddleware } from './middlewares/context'
 import { authMiddleware } from './middlewares/auth'
 
-
-// Módulos
-import testPushRoutes from '../src/modules/notificaciones/testpush.routes'
+// Módulos (de producción)
 import { pushRouter } from './modules/notificaciones/push.routes'
 import firmsRoutes from './modules/geoespacial/firms.routes'
 import authRoutes from './modules/auth/auth.routes'
@@ -33,12 +31,13 @@ import monitorRoutes from './app/monitor.routes'
 import departamentosRoutes from './modules/catalogos/entities/departamentos.routes'
 import cierreRoutes from './modules/cierre/cierre.routes'
 
+// Subidas (fotos de reporte)
 import fotosReporteRoutes from './uploads/fotos-reporte.routes'
 
 const logger = pino({ level: env.LOG_LEVEL })
 const app = express()
 
-// app.set('trust proxy', 1) // si usas proxy
+// app.set('trust proxy', 1) // ⇐ descomenta si quieres que req.ip/secure funcionen detrás de Caddy
 
 // ---------------- Middlewares base ----------------
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }))
@@ -62,23 +61,46 @@ app.use(rateLimit({
   legacyHeaders: false,
 }))
 
-const uploadsDir = path.join(process.cwd(), 'uploads')
+// ---------------- Static /uploads (antes de auth) ----------------
+const uploadsDir = process.env.MEDIA_DIR || path.resolve(process.cwd(), 'uploads')
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true })
 }
-app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
+app.use('/uploads', express.static(uploadsDir, {
+  fallthrough: true,
+  maxAge: '7d',
+  setHeaders(res) { res.setHeader('X-Content-Type-Options', 'nosniff') },
+}))
 
+// ---------------- Rutas públicas básicas (antes de auth) ----------------
+app.use(healthRoutes)
+
+// ---------------- Contexto + Auth ----------------
 app.use(contextMiddleware)
 app.use(authMiddleware)
 
 // ---------------- Rutas ----------------
-app.use(healthRoutes)
 app.use('/auth', authRoutes)
 app.use('/push', pushRouter)
-app.use('/test', testPushRoutes);
+
+// /test opcional (solo si TEST_PUSH=true y el archivo existe)
+if (process.env.TEST_PUSH === 'true') {
+  try {
+    // Import dinámico para no romper si no está en build
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    const testPushModule = require('./modules/notificaciones/testpush.routes')
+    const testPushRoutes = testPushModule.default || testPushModule
+    app.use('/test', testPushRoutes)
+    logger.info('Ruta /test habilitada (TEST_PUSH=true)')
+  } catch (e) {
+    logger.warn('testpush.routes no disponible; omitiendo /test')
+  }
+}
+
 app.use('/usuarios', usuariosRoutes)
 app.use('/incendios', incendiosRoutes)
-app.use('/reportes', fotosReporteRoutes);
+app.use('/reportes', fotosReporteRoutes)  // subir/servir fotos
 app.use('/reportes', reportesRoutes)
 app.use('/catalogos', catalogosRoutes)
 app.use('/roles', rolesRoutes)
@@ -89,7 +111,6 @@ app.use('/cierre', cierreRoutes)
 app.use('/instituciones', institucionesRoutes)
 app.use('/puntos-calor', puntosCalorRoutes)
 app.use(estadosIncendioRoutes)
-
 
 app.get('/test-auth', (_req, res) => {
   res.json({ ok: true, user: res.locals.ctx?.user || null })
