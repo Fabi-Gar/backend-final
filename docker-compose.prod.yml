@@ -1,5 +1,3 @@
-version: "3.9"
-
 name: app-incendios
 
 networks:
@@ -21,7 +19,6 @@ services:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       TZ: ${TZ:-America/Guatemala}
-    # Bind mount para que los datos vivan en el host (mejor para respaldos/migraciones)
     volumes:
       - /opt/app-incendios/pg-data:/var/lib/postgresql/data
     healthcheck:
@@ -30,11 +27,6 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
     networks:
       - app-net
 
@@ -48,11 +40,6 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
     networks:
       - app-net
 
@@ -67,20 +54,14 @@ services:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
-      SCHEDULE: "30 2 * * *"   # diario 2:30 AM
+      SCHEDULE: "30 2 * * *"
       BACKUP_KEEP_DAYS: 7
       BACKUP_COMPRESSION: "gzip"
       BACKUP_DIR: /backups
       TZ: ${TZ:-America/Guatemala}
-    # Bind mount para extraer fácilmente los .sql.gz desde el host
     volumes:
       - /opt/app-incendios/pg-backups:/backups
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
     networks:
       - app-net
 
@@ -99,22 +80,23 @@ services:
       TZ: ${TZ:-America/Guatemala}
       LOG_LEVEL: ${LOG_LEVEL:-info}
 
-      # Base de datos interna (usa nombre del servicio, NO localhost)
+      # DB/Redis internos por nombre de servicio
       DB_HOST: pg
       DB_PORT: 5432
       DB_SSL: "false"
-
-      # Redis interno
       REDIS_URL: redis://redis:6379
 
-      # Secret heredado del .env (asegúrate de definirlo allí)
+      # Secret heredado del .env
       JWT_SECRET: ${JWT_SECRET}
+
+      # 👇 MUY IMPORTANTE: que escuche en toda la interfaz
+      HOST: "0.0.0.0"
+      PORT: "4000"
     depends_on:
       pg:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Usa entrypoint para correr migraciones/seeds y luego levantar el server
     command: ["/bin/sh", "/app/docker/entrypoint.sh"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health/liveness || exit 1"]
@@ -123,14 +105,9 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
     networks:
       - app-net
-    # No exponemos 4000 al host; Caddy hará el proxy en 80/443
+    # No exponemos 4000 al host; Caddy hace proxy 80/443
 
   caddy:
     image: caddy:2
@@ -138,7 +115,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    # Monta el Caddyfile y volúmenes persistentes de certificados
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy-data:/data
@@ -147,10 +123,5 @@ services:
       api:
         condition: service_started
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
     networks:
       - app-net
