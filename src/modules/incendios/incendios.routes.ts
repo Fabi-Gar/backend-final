@@ -7,7 +7,7 @@ import { Usuario } from '../seguridad/entities/usuario.entity'
 import { FindOptionsWhere, ILike, IsNull, Between } from 'typeorm'
 import { guardAuth, guardAdmin } from '../../middlewares/auth'
 import multer from 'multer'
-import { notifyIncendioAprobado, notifyIncendioNuevoRegion } from '../notificaciones/incendioNotify.service'
+
 import { auditRecord } from '../auditoria/auditoria.service'
 import { EstadoIncendio } from '../catalogos/entities/estado-incendio.entity'
 import { IncendioEstadoHistorial } from './entities/incendio-estado-historial.entity'
@@ -16,14 +16,16 @@ import path from 'path'
 import mime from 'mime-types'
 import { FotoReporte } from '../../modules/incendios/entities/foto-reporte.entity'
 import { env } from 'process'
-
 const router = Router()
+
+
 
 // --- helpers ---
 const point4326 = z.object({
   type: z.literal('Point'),
   coordinates: z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90)])
 })
+
 
 // --- helpers de error PG ---
 type PgMapped = { status: number; body: any } | null
@@ -36,7 +38,9 @@ function mapPgError(err: any, traceId?: string): PgMapped {
   const table: string | undefined = e?.table
   const message: string | undefined = e?.message
 
+  // FK violation
   if (code === '23503') {
+    // detail: 'Key (medio_uuid)=(...) is not present in table "catalogo_medios".'
     let column: string | undefined
     let value: string | undefined
     let refTable: string | undefined
@@ -60,7 +64,9 @@ function mapPgError(err: any, traceId?: string): PgMapped {
     }
   }
 
+  // Unique violation
   if (code === '23505') {
+    // detail: 'Key (campo)=(valor) already exists.'
     let column: string | undefined
     let value: string | undefined
     const m = /Key \((.+)\)=\((.+)\) already exists/i.exec(detail || '')
@@ -81,6 +87,7 @@ function mapPgError(err: any, traceId?: string): PgMapped {
     }
   }
 
+  // Not null violation
   if (code === '23502') {
     return {
       status: 422,
@@ -95,6 +102,7 @@ function mapPgError(err: any, traceId?: string): PgMapped {
     }
   }
 
+  // Invalid text representation / cast
   if (code === '22P02') {
     return {
       status: 400,
@@ -109,6 +117,7 @@ function mapPgError(err: any, traceId?: string): PgMapped {
     }
   }
 
+  // PostGIS / GeoJSON (a veces XX000 o 22023 con mensajes de parseo)
   if (code === 'XX000' || code === '22023' || /GeoJSON|ST_GeomFromGeoJSON/i.test(message || '')) {
     return {
       status: 400,
@@ -123,6 +132,7 @@ function mapPgError(err: any, traceId?: string): PgMapped {
     }
   }
 
+  // Por defecto
   return {
     status: 500,
     body: {
@@ -136,41 +146,18 @@ function mapPgError(err: any, traceId?: string): PgMapped {
   }
 }
 
-// ---- region helpers ----
-function buildRegionCodeFromReporteFields(input: {
-  departamento_uuid?: string | null
-  municipio_uuid?: string | null
-}) {
-  const d = input.departamento_uuid || 'NA'
-  const m = input.municipio_uuid || 'NA'
-  // ajusta el formato si tu notify service espera otra convención
-  return `${d}|${m}`
-}
 
-async function getLastReporteRegionCode(incendio_uuid: string): Promise<string> {
-  const rows = await AppDataSource.query(
-    `
-    SELECT departamento_uuid, municipio_uuid
-    FROM reportes
-    WHERE eliminado_en IS NULL AND incendio_uuid = $1
-    ORDER BY reportado_en DESC NULLS LAST, creado_en DESC
-    LIMIT 1
-    `,
-    [incendio_uuid]
-  )
-  if (!rows?.length) return 'NA|NA'
-  const { departamento_uuid, municipio_uuid } = rows[0] || {}
-  return buildRegionCodeFromReporteFields({ departamento_uuid, municipio_uuid })
-}
 
 // helper para default:
 async function getDefaultEstadoUuid() {
   const repo = AppDataSource.getRepository(EstadoIncendio)
+  // 1) intenta por codigo 'REPORTADO'
   const byCode = await repo.createQueryBuilder('e')
     .where('e.eliminado_en IS NULL AND e.codigo = :c', { c: 'REPORTADO' })
     .getOne()
   if (byCode) return (byCode as any).estado_incendio_uuid
 
+  // 2) cae al de menor orden
   const byOrden = await repo.createQueryBuilder('e')
     .where('e.eliminado_en IS NULL')
     .orderBy('e.orden', 'ASC')
@@ -184,18 +171,22 @@ const createIncendioSchema = z.object({
   titulo: z.string().min(1),
   descripcion: z.string().nullish(),
   centroide: point4326.nullish(),
-  estado_incendio_uuid: z.string().uuid().optional(),
+  estado_incendio_uuid: z.string().uuid().optional(), // server pone default si no viene
 })
 
+
 const createIncendioWithReporteSchema = z.object({
+  // campos del incendio
   titulo: z.string().min(1),
   descripcion: z.string().nullish(),
   centroide: point4326.nullish(),
   estado_incendio_uuid: z.string().uuid().optional(),
+
+  // bloque del reporte (obligatorio)
   reporte: z.object({
-    institucion_uuid: z.string().uuid().optional().nullable(),
+    institucion_uuid: z.string().uuid().optional().nullable(), // se completa con el perfil si no viene
     medio_uuid: z.string().uuid(),
-    ubicacion: point4326.nullish(),
+    ubicacion: point4326.nullish(), // si no viene, usamos el centroide del incendio
     reportado_en: z.coerce.date().optional(),
     observaciones: z.string().optional().nullable(),
     telefono: z.string().optional().nullable(),
@@ -211,7 +202,7 @@ const updateIncendioSchema = z.object({
   titulo: z.string().min(1).optional(),
   descripcion: z.string().optional(),
   centroide: point4326.nullish().optional(),
-  estado_incendio_uuid: z.string().uuid().optional(),
+  estado_incendio_uuid: z.string().uuid().optional(), // <-- sin nullish
 })
 
 router.get('/sin-aprobar', guardAdmin, async (req, res, next) => {
@@ -220,6 +211,7 @@ router.get('/sin-aprobar', guardAdmin, async (req, res, next) => {
     const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '50'), 10) || 50, 1), 200);
 
+    // Total
     const totalRows = await AppDataSource.query(
       `
       SELECT COUNT(*)::int AS total
@@ -232,6 +224,7 @@ router.get('/sin-aprobar', guardAdmin, async (req, res, next) => {
     );
     const total = totalRows?.[0]?.total ?? 0;
 
+    // Items (sin JOIN a regiones; región derivada de último reporte)
     const items = await AppDataSource.query(
       `
       SELECT
@@ -297,6 +290,7 @@ router.get('/sin-aprobar', guardAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
 // -------------------- LISTAR --------------------
 router.get('/', async (req, res, next) => {
   try {
@@ -342,6 +336,8 @@ router.get('/:uuid', async (req, res, next) => {
 })
 
 // -------------------- CREAR INCENDIO + REPORTE (con foto opcional por multipart/form-data) --------------------
+
+// directorio y base pública (misma lógica que fotos-reporte.routes.ts)
 const UPLOAD_DIR = path.resolve(process.cwd(), 'uploads')
 const PUBLIC_BASE = env.MEDIA_BASE_URL ?? `http://localhost:${env.PORT || 4000}`
 
@@ -349,11 +345,13 @@ async function ensureUploadsDir() {
   await fs.mkdir(UPLOAD_DIR, { recursive: true })
 }
 
+// Multer en memoria (10MB)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
 })
 
+// 🔹 Esquemas
 const incendioFields = z.object({
   titulo: z.string().min(1),
   descripcion: z.string().nullish(),
@@ -378,7 +376,7 @@ const reporteFields = z.object({
 const schemaPlano = incendioFields.extend({ reporte: reporteFields })
 const schemaAnidado = z.object({ incendio: incendioFields, reporte: reporteFields })
 
-router.post('/with-reporte', guardAuth, upload.single('file'),
+router.post('/with-reporte',guardAuth,upload.single('file'),
   async (req, res, next) => {
     try {
       const user = res.locals?.ctx?.user as Usuario | undefined
@@ -527,6 +525,7 @@ router.post('/with-reporte', guardAuth, upload.single('file'),
           ctx: res.locals.ctx,
         })
 
+        // ⬇️⬇️ devolver también createdFoto
         return { savedInc, createdReporteUuid, createdFoto }
       })
 
@@ -535,21 +534,13 @@ router.post('/with-reporte', guardAuth, upload.single('file'),
         relations: { creado_por: true },
       })
 
-      /* 🔔 Notificación por región (nuevo incendio en región del reporte)
-      const regionCode = buildRegionCodeFromReporteFields({
-        departamento_uuid: body.reporte.departamento_uuid ?? null,
-        municipio_uuid: body.reporte.municipio_uuid ?? null,
-      })
-      await notifyIncendioNuevoRegion({
-        id: result.savedInc.incendio_uuid,
-        titulo: (full?.titulo ?? result.savedInc.titulo) || undefined,
-        regionCode,
-      })*/
-
+      // ⬇️⬇️ incluir la foto en la respuesta si existe
       return res.status(201).json({
         ...((full ?? result.savedInc) as any),
         reporte_uuid: result.createdReporteUuid ?? null,
-        ...(result.createdFoto ? { foto: result.createdFoto } : {}),
+        ...(result.createdFoto
+          ? { foto: result.createdFoto }
+          : {}),
       })
     } catch (err: any) {
       if (err?.issues) {
@@ -576,6 +567,8 @@ router.post('/with-reporte', guardAuth, upload.single('file'),
   }
 )
 
+
+
 // -------------------- CREAR --------------------
 router.post('/', guardAuth, async (req, res, next) => {
   try {
@@ -601,11 +594,12 @@ router.post('/', guardAuth, async (req, res, next) => {
       requiere_aprobacion: true,
       aprobado: false,
       creado_por: { usuario_uuid: user.usuario_uuid } as any,
-      estado_incendio: { estado_incendio_uuid: estadoUuid } as any,
+      estado_incendio: { estado_incendio_uuid: estadoUuid } as any, // nunca null
     } as Partial<Incendio>) as Incendio
 
     const saved = await repo.save(ent)
 
+    // historial inicial
     await AppDataSource.getRepository(IncendioEstadoHistorial).save({
       incendio: { incendio_uuid: saved.incendio_uuid } as any,
       estado_incendio: { estado_incendio_uuid: estadoUuid } as any,
@@ -642,6 +636,7 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
 
     const repo = AppDataSource.getRepository(Incendio)
 
+    // obtén el estado previo directamente de la tabla (columna FK)
     const prevRow = await AppDataSource.query(
       `SELECT estado_incendio_uuid FROM incendios WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
       [uuid],
@@ -667,6 +662,7 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
     if (typeof body.descripcion === 'string') (inc as any).descripcion = body.descripcion
     if (typeof body.centroide !== 'undefined') (inc as any).centroide = body.centroide ?? null
 
+    // si viene estado_incendio_uuid, lo seteamos (NO permitir null aquí)
     let nuevoEstadoUuid: string | null = null
     if (typeof body.estado_incendio_uuid !== 'undefined') {
       nuevoEstadoUuid = body.estado_incendio_uuid
@@ -675,6 +671,7 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
 
     const saved = await repo.save(inc)
 
+    // si cambió el estado, guarda historial
     if (nuevoEstadoUuid && nuevoEstadoUuid !== prevEstadoUuid) {
       await AppDataSource.getRepository(IncendioEstadoHistorial).save({
         incendio: { incendio_uuid: saved.incendio_uuid } as any,
@@ -723,7 +720,6 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
     ;(inc as any).motivo_rechazo = null
 
     const saved = await repo.save(inc)
-
     await auditRecord({
       tabla: 'incendios',
       registro_uuid: saved.incendio_uuid,
@@ -732,21 +728,6 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
       despues: { aprobado: saved.aprobado, requiere_aprobacion: saved.requiere_aprobacion, aprobado_en: saved.aprobado_en, aprobado_por: (saved as any).aprobado_por },
       ctx: res.locals.ctx
     })
-
-    /* 🔔 Notificar al creador que fue aprobado
-    await notifyIncendioAprobado({
-      id: saved.incendio_uuid,
-      titulo: saved.titulo || undefined,
-      creadorUserId: String((inc as any).creado_por_uuid),
-    })
-
-    // 🔔 Notificación por región (en la región del último reporte)
-    const regionCode = await getLastReporteRegionCode(saved.incendio_uuid)
-    await notifyIncendioNuevoRegion({
-      id: saved.incendio_uuid,
-      titulo: saved.titulo || undefined,
-      regionCode,
-    })*/
 
     res.json(saved)
   } catch (err) { next(err) }
