@@ -596,10 +596,10 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
       })
     }
 
-    // 🔔 Notificación: Cierre actualizado (si hubo algo)
+    /* 🔔 Notificación: Cierre actualizado (si hubo algo)
     if (updatesFeed.length) {
       await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), updatesFeed[0])
-    }
+    }*/
 
     return res.json({ ok: true })
   } catch (e: any) {
@@ -692,7 +692,7 @@ router.post('/:incendio_uuid/finalizar', guardAuth, async (req, res, next) => {
         ctx: res.locals.ctx,
       })
 
-      // 🔔 Notificaciones (finalizado)
+       /*🔔 Notificaciones (finalizado)
       const ctx = await getNotifContext(incendio_uuid)
       await notifyCierreEvento({
         type: 'cierre_finalizado',
@@ -713,7 +713,7 @@ router.post('/:incendio_uuid/finalizar', guardAuth, async (req, res, next) => {
             regionCode: ctx.regionCode,
           },
         })
-      }
+      }*/
     }
 
     return res.json({ ok: true, extinguido_at: finalDate, alreadyClosed })
@@ -1020,7 +1020,7 @@ router.post('/init', guardAuth, async (req, res, next) => {
         ctx: res.locals.ctx,
       })
 
-      // 🔔 Notificación: Cierre iniciado
+      /* 🔔 Notificación: Cierre iniciado
       const ctx = await getNotifContext(incendio_uuid)
       await notifyCierreEvento({
         type: 'cierre_iniciado',
@@ -1032,7 +1032,7 @@ router.post('/init', guardAuth, async (req, res, next) => {
         autorNombre: autorFromCtx(user),
         resumen: 'Se inició el cierre del incendio',
         primerReportanteUserId: ctx.primerReportanteUserId ?? null,
-      })
+      })*/
     }
 
     return res.status(201).json({
@@ -1089,7 +1089,7 @@ router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, n
       ctx: res.locals.ctx,
     })
 
-    // 🔔 Notificación: Cierre reabierto
+    /* 🔔 Notificación: Cierre reabierto
     const ctx = await getNotifContext(incendio_uuid)
     await notifyCierreEvento({
       type: 'cierre_reabierto',
@@ -1101,7 +1101,7 @@ router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, n
       autorNombre: autorFromCtx(user),
       resumen: 'Incendio reabierto para edición',
       primerReportanteUserId: ctx.primerReportanteUserId ?? null,
-    })
+    })*/
 
     return res.json({ ok: true, reopened: true })
   } catch (e) {
@@ -1150,7 +1150,7 @@ router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth,
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio terrestre actualizado')
+   // await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio terrestre actualizado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1186,7 +1186,7 @@ router.delete('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', guardAuth
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio terrestre eliminado')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio terrestre eliminado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1233,7 +1233,7 @@ router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async (
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio aéreo actualizado')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio aéreo actualizado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1269,7 +1269,7 @@ router.delete('/:incendio_uuid/medios-aereos/:medio_aereo_id', guardAuth, async 
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio aéreo eliminado')
+   // await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio aéreo eliminado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1307,7 +1307,7 @@ router.patch('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, a
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio acuático actualizado')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio acuático actualizado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1343,7 +1343,7 @@ router.delete('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', guardAuth, 
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio acuático eliminado')
+   // await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Medio acuático eliminado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1380,7 +1380,7 @@ router.delete('/:incendio_uuid/instituciones/:institucion_uuid', guardAuth, asyn
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Institución eliminada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Institución eliminada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1418,7 +1418,7 @@ router.patch('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req, res, n
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Abasto actualizado')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Abasto actualizado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1454,7 +1454,7 @@ router.delete('/:incendio_uuid/abastos/:abasto_id', guardAuth, async (req, res, 
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Abasto eliminado')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Abasto eliminado')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1492,7 +1492,7 @@ router.patch('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (r
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Propiedad actualizada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Propiedad actualizada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1528,7 +1528,7 @@ router.delete('/:incendio_uuid/propiedad/:tipo_propiedad_id', guardAuth, async (
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Propiedad eliminada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Propiedad eliminada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1566,7 +1566,7 @@ router.patch('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req, res, ne
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Técnica de extinción actualizada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Técnica de extinción actualizada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1602,7 +1602,7 @@ router.delete('/:incendio_uuid/tecnicas/:tecnica', guardAuth, async (req, res, n
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Técnica de extinción eliminada')
+   // await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Técnica de extinción eliminada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1640,7 +1640,7 @@ router.patch('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, as
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Composición por tipo actualizada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Composición por tipo actualizada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1675,7 +1675,7 @@ router.delete('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', guardAuth, a
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Composición por tipo eliminada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Composición por tipo eliminada')
 
     res.json({ ok: true })
   } catch (e) { next(e) }
@@ -1727,7 +1727,7 @@ router.patch('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req,
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Superficie de vegetación actualizada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Superficie de vegetación actualizada')
 
     return res.json({ ok: true, id })
   } catch (e) { next(e) }
@@ -1767,7 +1767,7 @@ router.delete('/:incendio_uuid/superficie-vegetacion/:id', guardAuth, async (req
     )
 
     // 🔔 Notificación
-    await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Superficie de vegetación eliminada')
+    //await notifyCierreActualizado(incendio_uuid, autorFromCtx(user), 'Superficie de vegetación eliminada')
 
     return res.json({ ok: true })
   } catch (e) { next(e) }

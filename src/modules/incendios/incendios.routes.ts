@@ -535,7 +535,7 @@ router.post('/with-reporte', guardAuth, upload.single('file'),
         relations: { creado_por: true },
       })
 
-      // 🔔 Notificación por región (nuevo incendio en región del reporte)
+      /* 🔔 Notificación por región (nuevo incendio en región del reporte)
       const regionCode = buildRegionCodeFromReporteFields({
         departamento_uuid: body.reporte.departamento_uuid ?? null,
         municipio_uuid: body.reporte.municipio_uuid ?? null,
@@ -544,7 +544,7 @@ router.post('/with-reporte', guardAuth, upload.single('file'),
         id: result.savedInc.incendio_uuid,
         titulo: (full?.titulo ?? result.savedInc.titulo) || undefined,
         regionCode,
-      })
+      })*/
 
       return res.status(201).json({
         ...((full ?? result.savedInc) as any),
@@ -733,7 +733,7 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
       ctx: res.locals.ctx
     })
 
-    // 🔔 Notificar al creador que fue aprobado
+    /* 🔔 Notificar al creador que fue aprobado
     await notifyIncendioAprobado({
       id: saved.incendio_uuid,
       titulo: saved.titulo || undefined,
@@ -746,7 +746,7 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
       id: saved.incendio_uuid,
       titulo: saved.titulo || undefined,
       regionCode,
-    })
+    })*/
 
     res.json(saved)
   } catch (err) { next(err) }
