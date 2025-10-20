@@ -7,7 +7,7 @@ const secret: string = String(env.JWT_SECRET) // fuerza string, evita overload "
 const issuer: string | undefined = env.JWT_ISSUER || undefined
 const audience: string | undefined = env.JWT_AUDIENCE || undefined
 const expiresIn: SignOptions['expiresIn'] =
-  (env.JWT_EXPIRES_IN as any) || '2h' // puede ser string ("2h") o number (3600)
+  (env.JWT_EXPIRES_IN as any) || '90d'
 
 type SignInput = {
   sub: string // usuario_uuid
