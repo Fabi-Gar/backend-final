@@ -117,6 +117,7 @@ services:
       PORT: "4000"
     volumes:
       - uploads-data:/app/uploads    # <-- volumen persistente para tus fotos/adjuntos
+      - ./config:/app/config          # <-- NUEVO: monta carpeta config para Firebase
     depends_on:
       pg:
         condition: service_healthy
