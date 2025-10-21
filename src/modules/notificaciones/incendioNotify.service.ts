@@ -9,8 +9,15 @@ export async function notifyIncendioAprobado(incendio: {
   creadorUserId: string;
 }) {
   const prefs = await PushPrefsRepo.getByUserId(incendio.creadorUserId);
+  
+  // ✅ Verificar si el usuario quiere recibir notificaciones de aprobación
+  if (!prefs || !prefs.avisarmeAprobado) {
+    console.log(`⏭️ Usuario ${incendio.creadorUserId} no quiere notificaciones de aprobación`);
+    return;
+  }
+
   const tokens = (prefs?.tokens || []).filter(t => t.active).map(t => t.token);
-  if (!prefs || !prefs.avisarmeAprobado || tokens.length === 0) return;
+  if (tokens.length === 0) return;
 
   await sendExpoPush(tokens, {
     title: '✅ Tu incendio fue aprobado',
@@ -29,13 +36,17 @@ export async function notifyIncendioActualizado(incendio: {
   titulo?: string;
   creadorUserId: string;
   seguidoresUserIds?: string[];
-  cambios?: string; // ej: "Estado cambiado a Controlado"
+  cambios?: string;
 }) {
-  // Obtener todos los usuarios interesados (creador + seguidores)
   const userIds = new Set<string>([String(incendio.creadorUserId)]);
   (incendio.seguidoresUserIds || []).forEach(u => userIds.add(String(u)));
   
-  const tokens = await PushPrefsRepo.getTokensForUserIds(Array.from(userIds));
+  // ✅ Filtrar tokens de usuarios que quieren recibir actualizaciones
+  const tokens = await PushPrefsRepo.getTokensForUserIdsWithPref(
+    Array.from(userIds),
+    'avisarmeActualizaciones'
+  );
+  
   if (!tokens.length) return;
 
   await sendExpoPush(tokens, {
@@ -59,11 +70,15 @@ export async function notifyIncendioCerrado(incendio: {
   seguidoresUserIds?: string[];
   resumenCierre?: string;
 }) {
-  // Notificar a todos los involucrados
   const userIds = new Set<string>([String(incendio.creadorUserId)]);
   (incendio.seguidoresUserIds || []).forEach(u => userIds.add(String(u)));
   
-  const tokens = await PushPrefsRepo.getTokensForUserIds(Array.from(userIds));
+  // ✅ Filtrar tokens de usuarios que quieren recibir notificaciones de cierre
+  const tokens = await PushPrefsRepo.getTokensForUserIdsWithPref(
+    Array.from(userIds),
+    'avisarmeCierres'
+  );
+  
   if (!tokens.length) return;
 
   await sendExpoPush(tokens, {
@@ -79,20 +94,18 @@ export async function notifyIncendioCerrado(incendio: {
   });
 }
 
-// 4. Notificar nuevo incendio por MUNICIPIO (región específica)
+// 4. Notificar nuevo incendio por MUNICIPIO
 export async function notifyIncendioNuevoMunicipio(incendio: {
   id: string | number;
   titulo?: string;
-  municipioCode: string; // código del municipio
-  departamentoCode?: string; // opcional, para contexto
-  ubicacion?: string; // ej: "Cerca de San Sebastián"
+  municipioCode: string;
+  departamentoCode?: string;
+  ubicacion?: string;
 }) {
   const tokens = await PushPrefsRepo.getTokensByMunicipio(incendio.municipioCode);
   if (!tokens.length) return;
 
-  const locationText = incendio.ubicacion 
-    ? ` en ${incendio.ubicacion}`
-    : '';
+  const locationText = incendio.ubicacion ? ` en ${incendio.ubicacion}` : '';
 
   await sendExpoPush(tokens, {
     title: '🔥 Nuevo incendio en tu municipio',
@@ -107,7 +120,7 @@ export async function notifyIncendioNuevoMunicipio(incendio: {
   });
 }
 
-// 5. OPCIONAL: Notificar por departamento (si también quieres esta opción)
+// 5. Notificar por departamento
 export async function notifyIncendioNuevoDepartamento(incendio: {
   id: string | number;
   titulo?: string;
@@ -117,9 +130,7 @@ export async function notifyIncendioNuevoDepartamento(incendio: {
   const tokens = await PushPrefsRepo.getTokensByRegion(incendio.departamentoCode);
   if (!tokens.length) return;
 
-  const locationText = incendio.municipioNombre 
-    ? ` en ${incendio.municipioNombre}`
-    : '';
+  const locationText = incendio.municipioNombre ? ` en ${incendio.municipioNombre}` : '';
 
   await sendExpoPush(tokens, {
     title: '🔥 Nuevo incendio en tu región',

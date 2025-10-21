@@ -57,7 +57,6 @@ export const PushPrefsRepo = {
     );
     
     const tokenRepo = AppDataSource.getRepository(UserPushToken);
-
     let tok = await tokenRepo.findOne({ where: { token: expoToken } });
     if (tok) {
       tok.active = true;
@@ -75,7 +74,7 @@ export const PushPrefsRepo = {
       });
       await tokenRepo.save(tok);
     }
-
+    
     // Actualizar preferencias
     const prefsRepo = AppDataSource.getRepository(UserPushPrefs);
     await prefsRepo.update({ id: prefs.id }, {
@@ -85,7 +84,7 @@ export const PushPrefsRepo = {
       avisarmeActualizaciones,
       avisarmeCierres,
     });
-
+    
     return { prefsId: prefs.id, tokenId: tok.id };
   },
 
@@ -101,14 +100,14 @@ export const PushPrefsRepo = {
     const repo = AppDataSource.getRepository(UserPushPrefs);
     const prefs = await repo.findOne({ where: { userId } });
     if (!prefs) return null;
-
+    
     const patch: Partial<UserPushPrefs> = {};
     if (Array.isArray(municipios)) patch.municipiosSuscritos = municipios;
     if (Array.isArray(departamentos)) patch.departamentosSuscritos = departamentos;
     if (typeof avisarmeAprobado === 'boolean') patch.avisarmeAprobado = avisarmeAprobado;
     if (typeof avisarmeActualizaciones === 'boolean') patch.avisarmeActualizaciones = avisarmeActualizaciones;
     if (typeof avisarmeCierres === 'boolean') patch.avisarmeCierres = avisarmeCierres;
-
+    
     await repo.update({ id: prefs.id }, patch);
     return await repo.findOne({ where: { id: prefs.id } });
   },
@@ -123,7 +122,27 @@ export const PushPrefsRepo = {
     return { tokenId: tok.id, active: tok.active };
   },
 
-  // Obtener tokens de usuarios específicos
+  // 🆕 Obtener tokens de usuarios específicos CON FILTRO DE PREFERENCIAS
+  async getTokensForUserIdsWithPref(
+    userIds: string[], 
+    prefField: 'avisarmeAprobado' | 'avisarmeActualizaciones' | 'avisarmeCierres'
+  ): Promise<string[]> {
+    if (!userIds.length) return [];
+    const rows = await AppDataSource.query(
+      `
+      SELECT DISTINCT t.token
+      FROM user_push_tokens t
+      JOIN user_push_prefs p ON p.id = t.prefs_id
+      WHERE t.active = TRUE
+        AND p.user_id = ANY($1::text[])
+        AND p.${prefField} = TRUE
+      `,
+      [userIds]
+    );
+    return rows.map((r: any) => r.token);
+  },
+
+  // Obtener tokens de usuarios específicos (sin filtro de preferencias)
   async getTokensForUserIds(userIds: string[]): Promise<string[]> {
     if (!userIds.length) return [];
     const rows = await AppDataSource.query(

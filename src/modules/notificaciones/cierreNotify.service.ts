@@ -10,7 +10,12 @@ async function tokensParaCierre(
   const userIds = new Set<string>([String(incendio.creadorUserId)]);
   if (primerReportanteUserId) userIds.add(String(primerReportanteUserId));
   (incendio.seguidoresUserIds || []).forEach(u => userIds.add(String(u)));
-  return await PushPrefsRepo.getTokensForUserIds(Array.from(userIds));
+  
+  // ✅ Filtrar tokens de usuarios que quieren recibir notificaciones de cierre
+  return await PushPrefsRepo.getTokensForUserIdsWithPref(
+    Array.from(userIds),
+    'avisarmeCierres'
+  );
 }
 
 export async function notifyCierreEvento(params: {
@@ -28,13 +33,16 @@ export async function notifyCierreEvento(params: {
   const { type, incendio, autorNombre, resumen, primerReportanteUserId } = params;
 
   const tokens = await tokensParaCierre(incendio, primerReportanteUserId);
-  if (!tokens.length) return;
+  if (!tokens.length) {
+    console.log('⏭️ No hay tokens activos para notificar evento de cierre');
+    return;
+  }
 
   const titles: Record<CierreUpdateType, string> = {
-    cierre_iniciado:   'Se inició el cierre',
-    cierre_actualizado:'Cierre actualizado',
-    cierre_finalizado: 'Cierre finalizado',
-    cierre_reabierto:  'Cierre reabierto',
+    cierre_iniciado:   '🔄 Se inició el cierre',
+    cierre_actualizado:'📝 Cierre actualizado',
+    cierre_finalizado: '✅ Cierre finalizado',
+    cierre_reabierto:  '🔓 Cierre reabierto',
   };
 
   const body = [
@@ -58,9 +66,13 @@ export async function notifyCierreFinalizadoARegion(params: {
   incendio: { id: string | number; titulo?: string; regionCode: string };
 }) {
   const tokens = await PushPrefsRepo.getTokensByRegion(params.incendio.regionCode);
-  if (!tokens.length) return;
+  if (!tokens.length) {
+    console.log('⏭️ No hay tokens suscritos a la región');
+    return;
+  }
+  
   await sendExpoPush(tokens, {
-    title: 'Incendio finalizado en tu zona',
+    title: '✅ Incendio finalizado en tu zona',
     body: params.incendio.titulo || 'Toca para ver detalles',
     data: {
       type: 'cierre_finalizado',
