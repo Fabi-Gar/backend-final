@@ -92,7 +92,21 @@ exports.PushPrefsRepo = {
         await repo.save(tok);
         return { tokenId: tok.id, active: tok.active };
     },
-    // Obtener tokens de usuarios específicos
+    // 🆕 Obtener tokens de usuarios específicos CON FILTRO DE PREFERENCIAS
+    async getTokensForUserIdsWithPref(userIds, prefField) {
+        if (!userIds.length)
+            return [];
+        const rows = await data_source_1.AppDataSource.query(`
+      SELECT DISTINCT t.token
+      FROM user_push_tokens t
+      JOIN user_push_prefs p ON p.id = t.prefs_id
+      WHERE t.active = TRUE
+        AND p.user_id = ANY($1::text[])
+        AND p.${prefField} = TRUE
+      `, [userIds]);
+        return rows.map((r) => r.token);
+    },
+    // Obtener tokens de usuarios específicos (sin filtro de preferencias)
     async getTokensForUserIds(userIds) {
         if (!userIds.length)
             return [];

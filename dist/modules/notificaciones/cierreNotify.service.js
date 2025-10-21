@@ -10,18 +10,21 @@ async function tokensParaCierre(incendio, primerReportanteUserId) {
     if (primerReportanteUserId)
         userIds.add(String(primerReportanteUserId));
     (incendio.seguidoresUserIds || []).forEach(u => userIds.add(String(u)));
-    return await pushPrefs_repo_1.PushPrefsRepo.getTokensForUserIds(Array.from(userIds));
+    // ✅ Filtrar tokens de usuarios que quieren recibir notificaciones de cierre
+    return await pushPrefs_repo_1.PushPrefsRepo.getTokensForUserIdsWithPref(Array.from(userIds), 'avisarmeCierres');
 }
 async function notifyCierreEvento(params) {
     const { type, incendio, autorNombre, resumen, primerReportanteUserId } = params;
     const tokens = await tokensParaCierre(incendio, primerReportanteUserId);
-    if (!tokens.length)
+    if (!tokens.length) {
+        console.log('⏭️ No hay tokens activos para notificar evento de cierre');
         return;
+    }
     const titles = {
-        cierre_iniciado: 'Se inició el cierre',
-        cierre_actualizado: 'Cierre actualizado',
-        cierre_finalizado: 'Cierre finalizado',
-        cierre_reabierto: 'Cierre reabierto',
+        cierre_iniciado: '🔄 Se inició el cierre',
+        cierre_actualizado: '📝 Cierre actualizado',
+        cierre_finalizado: '✅ Cierre finalizado',
+        cierre_reabierto: '🔓 Cierre reabierto',
     };
     const body = [
         incendio.titulo || 'Incendio',
@@ -40,10 +43,12 @@ async function notifyCierreEvento(params) {
 }
 async function notifyCierreFinalizadoARegion(params) {
     const tokens = await pushPrefs_repo_1.PushPrefsRepo.getTokensByRegion(params.incendio.regionCode);
-    if (!tokens.length)
+    if (!tokens.length) {
+        console.log('⏭️ No hay tokens suscritos a la región');
         return;
+    }
     await (0, expoPush_service_1.sendExpoPush)(tokens, {
-        title: 'Incendio finalizado en tu zona',
+        title: '✅ Incendio finalizado en tu zona',
         body: params.incendio.titulo || 'Toca para ver detalles',
         data: {
             type: 'cierre_finalizado',
