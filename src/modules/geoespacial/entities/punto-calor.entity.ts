@@ -1,9 +1,10 @@
-// src/modules/firms/entities/punto-calor.entity.ts (tu archivo)
+// src/modules/firms/entities/punto-calor.entity.ts
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, DeleteDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm'
 import { Incendio } from '../../incendios/entities/incendio.entity'
 
 @Entity('puntos_calor')
 @Index('idx_puntos_calor_fecha', ['acq_date'])
+@Index('idx_puntos_calor_hash_dedupe', ['hash_dedupe'], { unique: true }) // ← AGREGAR ESTO
 export class PuntoCalor {
   @PrimaryGeneratedColumn('uuid', { name: 'punto_calor_uuid' })
   punto_calor_uuid!: string
@@ -57,7 +58,7 @@ export class PuntoCalor {
   region!: string | null
 
   @Column({ type: 'text', nullable: true })
-  hash_dedupe!: string | null
+  hash_dedupe!: string | null  
 
   @ManyToOne(() => Incendio, { nullable: true })
   @JoinColumn({ name: 'incendio_uuid', referencedColumnName: 'incendio_uuid', foreignKeyConstraintName: 'fk_puntos_calor_incendio_uuid' })
