@@ -604,15 +604,15 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
           // Guardar notificación en BD
           const notiRepo = AppDataSource.getRepository(Notificacion)
           await notiRepo.save({
-            usuario_uuid: inc.creado_por_uuid,
-            tipo: 'incendio_cerrado',
-            payload: {
-              incendio_id: inc.incendio_uuid,
-              extinguido_at: finalDate,
-            },
-            leida_en: null,
-          })
-
+          usuario_uuid: inc.creado_por_uuid,
+          tipo: 'incendio_cerrado',
+          titulo: '🏁 Incendio cerrado',
+          mensaje: `El incendio "${inc.titulo}" ha sido extinguido`,
+          payload: {
+            incendio_id: inc.incendio_uuid,
+            extinguido_at: finalDate,
+          },
+        })
           // Notificar a la región (municipio)
           const reporteData = await AppDataSource.query(
             `SELECT r.municipio_uuid, m.codigo
@@ -979,10 +979,11 @@ router.post('/init', guardAuth, async (req, res, next) => {
           await notiRepo.save({
             usuario_uuid: inc.creado_por_uuid,
             tipo: 'cierre_iniciado',
+            titulo: '📋 Cierre de incendio iniciado',
+            mensaje: `Se ha iniciado el proceso de cierre para "${inc.titulo}"`,
             payload: {
               incendio_id: inc.incendio_uuid,
             },
-            leida_en: null,
           })
         }
       } catch (notifError) {

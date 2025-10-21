@@ -10,6 +10,7 @@ import fs from 'fs'
 import env from './config/env'
 import healthRoutes from './app/health.routes'
 import { notFound, onError } from './app/error'
+import seguidoresRoutes from './modules/incendios/seguidores.routes'
 
 // Middlewares personalizados
 import { contextMiddleware } from './middlewares/context'
@@ -96,6 +97,7 @@ app.use(notificacionesRoutes) // GET /api/notificaciones, POST /api/notificacion
 // ---------------- Rutas principales ----------------
 app.use('/usuarios', usuariosRoutes)
 app.use('/incendios', incendiosRoutes)
+app.use('/incendios', seguidoresRoutes)
 app.use('/reportes', fotosReporteRoutes)  // subir/servir fotos
 app.use('/reportes', reportesRoutes)
 app.use('/catalogos', catalogosRoutes)

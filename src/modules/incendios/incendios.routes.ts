@@ -531,16 +531,49 @@ router.post('/with-reporte',guardAuth,upload.single('file'),
           ctx: res.locals.ctx,
         })
 
-        // ⬇️⬇️ devolver también createdFoto
         return { savedInc, createdReporteUuid, createdFoto }
       })
+
+      // ✅ NOTIFICAR A ADMINS que hay un incendio pendiente de aprobación
+      try {
+        // Obtener todos los usuarios admin
+        const admins = await AppDataSource.query(
+          `SELECT u.usuario_uuid 
+           FROM usuarios u
+           WHERE u.is_admin = true AND u.eliminado_en IS NULL`
+        )
+
+        const adminIds = admins.map((a: any) => a.usuario_uuid)
+        
+        if (adminIds.length > 0) {
+          const notiRepo = AppDataSource.getRepository(Notificacion)
+          
+          for (const adminId of adminIds) {
+            await notiRepo.save({
+              usuario_uuid: adminId,
+              tipo: 'incendio_pendiente_aprobacion',
+              titulo: '⚠️ Nuevo incendio pendiente de aprobación',
+              mensaje: `"${result.savedInc.titulo}" requiere tu aprobación`,
+              payload: {
+                incendio_id: result.savedInc.incendio_uuid,
+                creado_por: (user as any).usuario_uuid,
+              },
+              leida_en: null,
+            })
+          }
+
+          console.log(`📢 ${adminIds.length} admin(s) notificados de nuevo incendio: ${result.savedInc.titulo}`)
+        }
+      } catch (notifError) {
+        console.error('[notificacion] Error notificando admins:', notifError)
+        // No bloqueamos la respuesta si falla la notificación
+      }
 
       const full = await AppDataSource.getRepository(Incendio).findOne({
         where: { incendio_uuid: result.savedInc.incendio_uuid, eliminado_en: IsNull() },
         relations: { creado_por: true },
       })
 
-      // ⬇️⬇️ incluir la foto en la respuesta si existe
       return res.status(201).json({
         ...((full ?? result.savedInc) as any),
         reporte_uuid: result.createdReporteUuid ?? null,
@@ -572,7 +605,6 @@ router.post('/with-reporte',guardAuth,upload.single('file'),
     }
   }
 )
-
 
 
 // -------------------- CREAR --------------------
