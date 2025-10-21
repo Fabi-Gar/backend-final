@@ -12,6 +12,7 @@ const router = Router()
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+  expoPushToken: z.string().optional(),
 })
 
 const publicRegisterSchema = z.object({
@@ -21,6 +22,7 @@ const publicRegisterSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
   institucion_uuid: z.string().uuid().optional().nullable(),
+  expoPushToken: z.string().optional(), // ← También para registro
 })
 
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms))
@@ -80,6 +82,26 @@ router.post('/register', async (req, res, next) => {
       nombre: `${user.nombre ?? ''} ${user.apellido ?? ''}`.trim() || undefined,
     })
 
+    // ✅ Registrar token push si viene
+    if (body.expoPushToken) {
+      try {
+        const { PushService } = await import('../notificaciones/push.service')
+        await PushService.register({
+          userId: user.usuario_uuid,
+          expoPushToken: body.expoPushToken,
+          avisarmeAprobado: true,
+          avisarmeActualizaciones: true,
+          avisarmeCierres: true,
+          municipiosSuscritos: [],
+          departamentosSuscritos: [],
+        })
+        console.log(`✅ Token push registrado para nuevo usuario: ${user.email}`)
+      } catch (err) {
+        console.error('⚠️ Error registrando token push en registro:', err)
+        // No fallar el registro si falla el token
+      }
+    }
+
     // Devuelve token + user safe
     const { password_hash: _ph, ...safe } = user as any
     res.status(201).json({ token, user: safe })
@@ -99,7 +121,7 @@ router.post('/register', async (req, res, next) => {
  */
 router.post('/login', async (req, res, next) => {
   try {
-    const { email, password } = loginSchema.parse(req.body)
+    const { email, password, expoPushToken } = loginSchema.parse(req.body)
 
     const emailN = email.trim().toLowerCase()
     const repo = AppDataSource.getRepository(Usuario)
@@ -128,7 +150,6 @@ router.post('/login', async (req, res, next) => {
 
     const fullName = `${(user as any).nombre ?? ''} ${(user as any).apellido ?? ''}`.trim()
 
-    // OJO: signAccessToken espera 'nombre', no 'name'
     const token = signAccessToken({
       sub: user.usuario_uuid,
       email: user.email || undefined,
@@ -139,6 +160,26 @@ router.post('/login', async (req, res, next) => {
     })
 
     await repo.update({ usuario_uuid: user.usuario_uuid }, { ultimo_login: new Date() })
+
+    // ✅ Registrar/actualizar token push si viene
+    if (expoPushToken) {
+      try {
+        const { PushService } = await import('../notificaciones/push.service')
+        await PushService.register({
+          userId: user.usuario_uuid,
+          expoPushToken,
+          avisarmeAprobado: true,
+          avisarmeActualizaciones: true,
+          avisarmeCierres: true,
+          municipiosSuscritos: [],
+          departamentosSuscritos: [],
+        })
+        console.log(`✅ Token push actualizado para: ${user.email}`)
+      } catch (err) {
+        console.error('⚠️ Error registrando token push en login:', err)
+        // No fallar el login si falla el token
+      }
+    }
 
     res.json({
       token,
