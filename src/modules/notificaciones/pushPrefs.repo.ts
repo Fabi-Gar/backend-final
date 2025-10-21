@@ -1,22 +1,35 @@
+// src/modules/notificaciones/pushPrefs.repo.ts
 import { AppDataSource } from '../../db/data-source';
 import { UserPushPrefs } from './entities/UserPushPrefs';
 import { UserPushToken } from './entities/UserPushToken';
 
 export const PushPrefsRepo = {
-  // usado por notifyIncendioAprobado
+  // Obtener preferencias de un usuario
   async getByUserId(userId: string) {
     const repo = AppDataSource.getRepository(UserPushPrefs);
     return repo.findOne({ where: { userId }, relations: { tokens: true } });
   },
 
-  async ensurePrefs(userId: string, regiones: string[] = [], avisarmeAprobado = true) {
+  // Crear o actualizar preferencias
+  async ensurePrefs(
+    userId: string, 
+    municipios: string[] = [], 
+    departamentos: string[] = [],
+    avisarmeAprobado = true,
+    avisarmeActualizaciones = true,
+    avisarmeCierres = true
+  ) {
     const repo = AppDataSource.getRepository(UserPushPrefs);
     let prefs = await repo.findOne({ where: { userId } });
+    
     if (!prefs) {
       prefs = repo.create({
         userId,
-        regionesSuscritas: regiones,
+        municipiosSuscritos: municipios,
+        departamentosSuscritos: departamentos,
         avisarmeAprobado,
+        avisarmeActualizaciones,
+        avisarmeCierres,
         extra: null,
       });
       prefs = await repo.save(prefs);
@@ -24,14 +37,25 @@ export const PushPrefsRepo = {
     return prefs;
   },
 
-  // firma que espera tu PushService.register
+  // Registrar token y preferencias
   async upsertTokenAndPrefs(
     userId: string,
     expoToken: string,
-    regionesSuscritas: string[] = [],
-    avisarmeAprobado = true
+    municipiosSuscritos: string[] = [],
+    departamentosSuscritos: string[] = [],
+    avisarmeAprobado = true,
+    avisarmeActualizaciones = true,
+    avisarmeCierres = true
   ) {
-    const prefs = await this.ensurePrefs(userId, regionesSuscritas, avisarmeAprobado);
+    const prefs = await this.ensurePrefs(
+      userId, 
+      municipiosSuscritos, 
+      departamentosSuscritos,
+      avisarmeAprobado,
+      avisarmeActualizaciones,
+      avisarmeCierres
+    );
+    
     const tokenRepo = AppDataSource.getRepository(UserPushToken);
 
     let tok = await tokenRepo.findOne({ where: { token: expoToken } });
@@ -52,31 +76,44 @@ export const PushPrefsRepo = {
       await tokenRepo.save(tok);
     }
 
-    // si vinieron nuevas prefs, actualízalas
+    // Actualizar preferencias
     const prefsRepo = AppDataSource.getRepository(UserPushPrefs);
     await prefsRepo.update({ id: prefs.id }, {
-      regionesSuscritas,
+      municipiosSuscritos,
+      departamentosSuscritos,
       avisarmeAprobado,
+      avisarmeActualizaciones,
+      avisarmeCierres,
     });
 
     return { prefsId: prefs.id, tokenId: tok.id };
   },
 
-  // firma que espera tu PushService.prefs
-  async updatePrefs(userId: string, regiones?: string[], avisarmeAprobado?: boolean) {
+  // Actualizar solo preferencias
+  async updatePrefs(
+    userId: string, 
+    municipios?: string[], 
+    departamentos?: string[],
+    avisarmeAprobado?: boolean,
+    avisarmeActualizaciones?: boolean,
+    avisarmeCierres?: boolean
+  ) {
     const repo = AppDataSource.getRepository(UserPushPrefs);
     const prefs = await repo.findOne({ where: { userId } });
     if (!prefs) return null;
 
     const patch: Partial<UserPushPrefs> = {};
-    if (Array.isArray(regiones)) patch.regionesSuscritas = regiones;
+    if (Array.isArray(municipios)) patch.municipiosSuscritos = municipios;
+    if (Array.isArray(departamentos)) patch.departamentosSuscritos = departamentos;
     if (typeof avisarmeAprobado === 'boolean') patch.avisarmeAprobado = avisarmeAprobado;
+    if (typeof avisarmeActualizaciones === 'boolean') patch.avisarmeActualizaciones = avisarmeActualizaciones;
+    if (typeof avisarmeCierres === 'boolean') patch.avisarmeCierres = avisarmeCierres;
 
     await repo.update({ id: prefs.id }, patch);
     return await repo.findOne({ where: { id: prefs.id } });
   },
 
-  // firma que espera tu PushService.unregister
+  // Desactivar token
   async removeToken(userId: string, expoToken: string) {
     const repo = AppDataSource.getRepository(UserPushToken);
     const tok = await repo.findOne({ where: { token: expoToken, userId } });
@@ -86,7 +123,7 @@ export const PushPrefsRepo = {
     return { tokenId: tok.id, active: tok.active };
   },
 
-  // usado por notifyCierre/Incendio
+  // Obtener tokens de usuarios específicos
   async getTokensForUserIds(userIds: string[]): Promise<string[]> {
     if (!userIds.length) return [];
     const rows = await AppDataSource.query(
@@ -102,17 +139,50 @@ export const PushPrefsRepo = {
     return rows.map((r: any) => r.token);
   },
 
-  // usado por notify*Region
+  // Obtener tokens por región (municipio o departamento)
   async getTokensByRegion(regionCode: string): Promise<string[]> {
     const rows = await AppDataSource.query(
       `
-      SELECT t.token
+      SELECT DISTINCT t.token
       FROM user_push_tokens t
       JOIN user_push_prefs p ON p.id = t.prefs_id
       WHERE t.active = TRUE
-        AND p.regiones_suscritas @> ARRAY[$1]::text[]
+        AND (
+          p.municipios_suscritos @> ARRAY[$1]::text[]
+          OR p.departamentos_suscritos @> ARRAY[$1]::text[]
+        )
       `,
       [regionCode]
+    );
+    return rows.map((r: any) => r.token);
+  },
+
+  // Obtener tokens solo por municipio
+  async getTokensByMunicipio(municipioCode: string): Promise<string[]> {
+    const rows = await AppDataSource.query(
+      `
+      SELECT DISTINCT t.token
+      FROM user_push_tokens t
+      JOIN user_push_prefs p ON p.id = t.prefs_id
+      WHERE t.active = TRUE
+        AND p.municipios_suscritos @> ARRAY[$1]::text[]
+      `,
+      [municipioCode]
+    );
+    return rows.map((r: any) => r.token);
+  },
+
+  // Obtener tokens solo por departamento
+  async getTokensByDepartamento(departamentoCode: string): Promise<string[]> {
+    const rows = await AppDataSource.query(
+      `
+      SELECT DISTINCT t.token
+      FROM user_push_tokens t
+      JOIN user_push_prefs p ON p.id = t.prefs_id
+      WHERE t.active = TRUE
+        AND p.departamentos_suscritos @> ARRAY[$1]::text[]
+      `,
+      [departamentoCode]
     );
     return rows.map((r: any) => r.token);
   },

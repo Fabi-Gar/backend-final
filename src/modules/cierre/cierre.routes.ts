@@ -4,6 +4,10 @@ import { z } from 'zod'
 import { AppDataSource } from '../../db/data-source'
 import { guardAuth, guardAdmin } from '../../middlewares/auth'
 import { auditRecord } from '../auditoria/auditoria.service'
+import { notifyIncendioCerrado } from '../notificaciones/incendioNotify.service'
+import { notifyCierreEvento } from '../notificaciones/cierreNotify.service'
+import { Notificacion } from '../notificaciones/entities/notificacion.entity'
+
 
 const router = Router()
 // ================== UTIL: validadores simples ==================
@@ -450,8 +454,37 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
       })
     }
 
+      if (updatesFeed.length > 0) {
+      try {
+        const incData = await AppDataSource.query(
+          `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+           FROM incendios i
+           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
+          [incendio_uuid]
+        )
+
+        if (incData?.[0]) {
+          const inc = incData[0]
+          
+          await notifyCierreEvento({
+            type: 'cierre_actualizado',
+            incendio: {
+              id: inc.incendio_uuid,
+              titulo: inc.titulo,
+              creadorUserId: inc.creado_por_uuid,
+              seguidoresUserIds: [], // TODO: Agregar seguidores
+            },
+            autorNombre: res.locals.ctx?.user?.nombre || 'Usuario',
+            resumen: updatesFeed[0], // Primera actualización como resumen
+          })
+        }
+      } catch (notifError) {
+        console.error('[notificacion] Error notificando actualización cierre:', notifError)
+      }
+    }
+
     return res.json({ ok: true })
-} catch (e: any) {
+  } catch (e: any) {
   // Zod / validación
   if (e?.issues) {
     return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues })
@@ -545,6 +578,66 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
         despues: { extinguido_at: finalDate },
         ctx: res.locals.ctx
       })
+
+      // ✅ NOTIFICAR CIERRE A PARTICIPANTES Y REGIÓN
+      try {
+        // Obtener info del incendio
+        const incData = await AppDataSource.query(
+          `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+           FROM incendios i
+           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
+          [incendio_uuid]
+        )
+
+        if (incData?.[0]) {
+          const inc = incData[0]
+
+          // Notificar a creador (y seguidores si los tienes)
+          await notifyIncendioCerrado({
+            id: inc.incendio_uuid,
+            titulo: inc.titulo,
+            creadorUserId: inc.creado_por_uuid,
+            seguidoresUserIds: [], // TODO: Agregar seguidores si los tienes
+            resumenCierre: 'El incendio ha sido extinguido',
+          })
+
+          // Guardar notificación en BD
+          const notiRepo = AppDataSource.getRepository(Notificacion)
+          await notiRepo.save({
+            usuario_uuid: inc.creado_por_uuid,
+            tipo: 'incendio_cerrado',
+            payload: {
+              incendio_id: inc.incendio_uuid,
+              extinguido_at: finalDate,
+            },
+            leida_en: null,
+          })
+
+          // Notificar a la región (municipio)
+          const reporteData = await AppDataSource.query(
+            `SELECT r.municipio_uuid, m.codigo
+             FROM reportes r
+             LEFT JOIN municipios m ON m.municipio_uuid = r.municipio_uuid
+             WHERE r.incendio_uuid = $1 AND r.eliminado_en IS NULL
+             ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC
+             LIMIT 1`,
+            [incendio_uuid]
+          )
+
+          if (reporteData?.[0]?.codigo) {
+            const { notifyCierreFinalizadoARegion } = require('../notificaciones/cierreNotify.service')
+            await notifyCierreFinalizadoARegion({
+              incendio: {
+                id: inc.incendio_uuid,
+                titulo: inc.titulo,
+                regionCode: reporteData[0].codigo, // código del municipio
+              },
+            })
+          }
+        }
+      } catch (notifError) {
+        console.error('[notificacion] Error notificando cierre:', notifError)
+      }
     }
 
     return res.json({ ok: true, extinguido_at: finalDate, alreadyClosed })
@@ -857,6 +950,44 @@ router.post('/init', guardAuth, async (req, res, next) => {
         despues: { incendio_uuid },
         ctx: res.locals.ctx
       })
+
+      // ✅ NOTIFICAR INICIO DE CIERRE
+      try {
+        const incData = await AppDataSource.query(
+          `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+           FROM incendios i
+           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
+          [incendio_uuid]
+        )
+
+        if (incData?.[0]) {
+          const inc = incData[0]
+          
+          await notifyCierreEvento({
+            type: 'cierre_iniciado',
+            incendio: {
+              id: inc.incendio_uuid,
+              titulo: inc.titulo,
+              creadorUserId: inc.creado_por_uuid,
+              seguidoresUserIds: [], // TODO: Agregar seguidores
+            },
+            autorNombre: res.locals.ctx?.user?.nombre || 'Usuario',
+          })
+
+          // Guardar en BD
+          const notiRepo = AppDataSource.getRepository(Notificacion)
+          await notiRepo.save({
+            usuario_uuid: inc.creado_por_uuid,
+            tipo: 'cierre_iniciado',
+            payload: {
+              incendio_id: inc.incendio_uuid,
+            },
+            leida_en: null,
+          })
+        }
+      } catch (notifError) {
+        console.error('[notificacion] Error notificando inicio cierre:', notifError)
+      }
     }
 
     return res.status(201).json({
@@ -869,7 +1000,6 @@ router.post('/init', guardAuth, async (req, res, next) => {
     next(e)
   }
 })
-
 router.post('/:incendio_uuid/reabrir', guardAuth, guardAdmin, async (req, res, next) => {
   try {
     const { incendio_uuid } = z.object({ incendio_uuid: z.string().uuid() }).parse(req.params)

@@ -7,7 +7,13 @@ import { Usuario } from '../seguridad/entities/usuario.entity'
 import { FindOptionsWhere, ILike, IsNull, Between } from 'typeorm'
 import { guardAuth, guardAdmin } from '../../middlewares/auth'
 import multer from 'multer'
-
+import { 
+  notifyIncendioAprobado,
+  notifyIncendioActualizado, 
+  notifyIncendioNuevoMunicipio,
+  notifyIncendioCerrado
+} from '../notificaciones/incendioNotify.service'
+import { Notificacion } from '../notificaciones/entities/notificacion.entity'
 import { auditRecord } from '../auditoria/auditoria.service'
 import { EstadoIncendio } from '../catalogos/entities/estado-incendio.entity'
 import { IncendioEstadoHistorial } from './entities/incendio-estado-historial.entity'
@@ -636,7 +642,6 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
 
     const repo = AppDataSource.getRepository(Incendio)
 
-    // obtén el estado previo directamente de la tabla (columna FK)
     const prevRow = await AppDataSource.query(
       `SELECT estado_incendio_uuid FROM incendios WHERE incendio_uuid = $1 AND eliminado_en IS NULL`,
       [uuid],
@@ -646,7 +651,10 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
     }
     const prevEstadoUuid: string = prevRow[0].estado_incendio_uuid
 
-    const inc = await repo.findOne({ where: { incendio_uuid: uuid, eliminado_en: IsNull() } })
+    const inc = await repo.findOne({ 
+      where: { incendio_uuid: uuid, eliminado_en: IsNull() },
+      relations: ['creado_por'] // ✅ Cargar relación
+    })
     if (!inc) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Incendio no existe' }, requestId: res.locals.ctx?.requestId })
     }
@@ -658,21 +666,36 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
 
     const before = { titulo: inc.titulo, descripcion: inc.descripcion, centroide: (inc as any).centroide }
 
-    if (typeof body.titulo === 'string') inc.titulo = body.titulo
-    if (typeof body.descripcion === 'string') (inc as any).descripcion = body.descripcion
-    if (typeof body.centroide !== 'undefined') (inc as any).centroide = body.centroide ?? null
+    // ✅ Detectar cambios para notificación
+    let cambiosTexto: string[] = []
+    
+    if (typeof body.titulo === 'string' && body.titulo !== inc.titulo) {
+      cambiosTexto.push('Título actualizado')
+      inc.titulo = body.titulo
+    }
+    if (typeof body.descripcion === 'string' && body.descripcion !== inc.descripcion) {
+      cambiosTexto.push('Descripción actualizada')
+      ;(inc as any).descripcion = body.descripcion
+    }
+    if (typeof body.centroide !== 'undefined') {
+      cambiosTexto.push('Ubicación actualizada')
+      ;(inc as any).centroide = body.centroide ?? null
+    }
 
-    // si viene estado_incendio_uuid, lo seteamos (NO permitir null aquí)
     let nuevoEstadoUuid: string | null = null
+    let estadoCambio = false
     if (typeof body.estado_incendio_uuid !== 'undefined') {
       nuevoEstadoUuid = body.estado_incendio_uuid
+      estadoCambio = nuevoEstadoUuid !== prevEstadoUuid
+      if (estadoCambio) {
+        cambiosTexto.push('Estado cambiado')
+      }
       ;(inc as any).estado_incendio = { estado_incendio_uuid: body.estado_incendio_uuid } as any
     }
 
     const saved = await repo.save(inc)
 
-    // si cambió el estado, guarda historial
-    if (nuevoEstadoUuid && nuevoEstadoUuid !== prevEstadoUuid) {
+    if (nuevoEstadoUuid && estadoCambio) {
       await AppDataSource.getRepository(IncendioEstadoHistorial).save({
         incendio: { incendio_uuid: saved.incendio_uuid } as any,
         estado_incendio: { estado_incendio_uuid: nuevoEstadoUuid } as any,
@@ -695,6 +718,32 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
       ctx: res.locals.ctx
     })
 
+    if (cambiosTexto.length > 0 && saved.aprobado) {
+      try {
+        await notifyIncendioActualizado({
+          id: saved.incendio_uuid,
+          titulo: saved.titulo ?? undefined,
+          creadorUserId: (saved as any).creado_por_uuid,
+          seguidoresUserIds: [],
+          cambios: cambiosTexto.join(', '),
+        })
+
+        // Guardar en BD
+        const notiRepo = AppDataSource.getRepository(Notificacion)
+        await notiRepo.save({
+          usuario_uuid: (saved as any).creado_por_uuid,
+          tipo: 'incendio_actualizado',
+          payload: {
+            incendio_id: saved.incendio_uuid,
+            cambios: cambiosTexto,
+          },
+          leida_en: null,
+        })
+      } catch (notifError) {
+        console.error('[notificacion] Error enviando actualización:', notifError)
+      }
+    }
+
     res.json(saved)
   } catch (err: any) {
     if (err?.issues) return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'Validación', issues: err.issues }, requestId: res.locals.ctx?.requestId })
@@ -707,7 +756,11 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
   try {
     const { uuid } = z.object({ uuid: z.string().uuid() }).parse(req.params)
     const repo = AppDataSource.getRepository(Incendio)
-    const inc = await repo.findOne({ where: { incendio_uuid: uuid, eliminado_en: IsNull() } })
+    
+    const inc = await repo.findOne({ 
+      where: { incendio_uuid: uuid, eliminado_en: IsNull() },
+      relations: ['creado_por'] // ✅ Cargar relación para tener datos
+    })
     if (!inc) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Incendio no existe' }, requestId: res.locals.ctx?.requestId })
 
     const before = { aprobado: inc.aprobado, requiere_aprobacion: inc.requiere_aprobacion }
@@ -728,6 +781,54 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
       despues: { aprobado: saved.aprobado, requiere_aprobacion: saved.requiere_aprobacion, aprobado_en: saved.aprobado_en, aprobado_por: (saved as any).aprobado_por },
       ctx: res.locals.ctx
     })
+
+    // ✅ NOTIFICACIÓN 1: Al creador que su incendio fue aprobado
+    try {
+      await notifyIncendioAprobado({
+        id: saved.incendio_uuid,
+        titulo: saved.titulo ?? undefined,
+        creadorUserId: (saved as any).creado_por_uuid,
+      })
+
+      // Guardar en BD
+      const notiRepo = AppDataSource.getRepository(Notificacion)
+      await notiRepo.save({
+        usuario_uuid: (saved as any).creado_por_uuid,
+        tipo: 'incendio_aprobado',
+        payload: {
+          incendio_id: saved.incendio_uuid,
+          titulo: saved.titulo,
+        },
+        leida_en: null,
+      })
+    } catch (notifError) {
+      console.error('[notificacion] Error notificando aprobación:', notifError)
+    }
+
+    // ✅ NOTIFICACIÓN 2: A usuarios del municipio
+    try {
+      // Obtener municipio del último reporte
+      const reporteData = await AppDataSource.query(
+        `SELECT r.municipio_uuid, m.codigo, m.nombre
+         FROM reportes r
+         LEFT JOIN municipios m ON m.municipio_uuid = r.municipio_uuid
+         WHERE r.incendio_uuid = $1 AND r.eliminado_en IS NULL
+         ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC
+         LIMIT 1`,
+        [saved.incendio_uuid]
+      )
+
+      if (reporteData?.[0]?.codigo) {
+        await notifyIncendioNuevoMunicipio({
+          id: saved.incendio_uuid,
+          titulo: saved.titulo ?? undefined,
+          municipioCode: reporteData[0].codigo,
+          ubicacion: reporteData[0].nombre,
+        })
+      }
+    } catch (notifError) {
+      console.error('[notificacion] Error notificando región:', notifError)
+    }
 
     res.json(saved)
   } catch (err) { next(err) }

@@ -15,10 +15,12 @@ import { notFound, onError } from './app/error'
 import { contextMiddleware } from './middlewares/context'
 import { authMiddleware } from './middlewares/auth'
 
-// Módulos (de producción)
+// Módulos de notificaciones
 import pushRoutes from './modules/notificaciones/push.routes'
-import notificacionesRoutes from './modules/notificaciones/push.routes';
-import testPushRoutes from './modules/notificaciones/testpush.routes';
+import notificacionesRoutes from './modules/notificaciones/notificaciones.routes'
+import testPushRoutes from './modules/notificaciones/testpush.routes'
+
+// Otros módulos
 import firmsRoutes from './modules/geoespacial/firms.routes'
 import authRoutes from './modules/auth/auth.routes'
 import usuariosRoutes from './modules/seguridad/usuarios.routes'
@@ -81,26 +83,20 @@ app.use(healthRoutes)
 app.use(contextMiddleware)
 app.use(authMiddleware)
 
-// ---------------- Rutas ----------------
+// ---------------- Rutas de autenticación ----------------
 app.use('/auth', authRoutes)
-app.use('/api', pushRoutes);
-app.use('/api', notificacionesRoutes);
 
-// /test opcional (solo si TEST_PUSH=true y el archivo existe)
-if (process.env.TEST_PUSH === 'true') {
-  try {
-    // Import dinámico para no romper si no está en build
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    const testPushModule = require('./modules/notificaciones/testpush.routes')
-    const testPushRoutes = testPushModule.default || testPushModule
-    app.use('/test', testPushRoutes)
-    logger.info('Ruta /test habilitada (TEST_PUSH=true)')
-  } catch (e) {
-    logger.warn('testpush.routes no disponible; omitiendo /test')
-  }
+// ---------------- Rutas de notificaciones push ----------------
+app.use('/api', pushRoutes) // POST /api/push/register, /api/push/prefs, /api/push/unregister
+app.use('/api', notificacionesRoutes) // GET /api/notificaciones, POST /api/notificaciones/:id/leer
+
+// Ruta de prueba (solo en desarrollo)
+if (env.NODE_ENV !== 'production' || process.env.TEST_PUSH === 'true') {
+  app.use('/api', testPushRoutes) // POST /api/test-push
+  logger.info('✅ Ruta de prueba de push habilitada: POST /api/test-push')
 }
 
+// ---------------- Rutas principales ----------------
 app.use('/usuarios', usuariosRoutes)
 app.use('/incendios', incendiosRoutes)
 app.use('/reportes', fotosReporteRoutes)  // subir/servir fotos
@@ -115,10 +111,12 @@ app.use('/instituciones', institucionesRoutes)
 app.use('/puntos-calor', puntosCalorRoutes)
 app.use(estadosIncendioRoutes)
 
+// Ruta de prueba de autenticación
 app.get('/test-auth', (_req, res) => {
   res.json({ ok: true, user: res.locals.ctx?.user || null })
 })
 
+// ---------------- Manejo de errores ----------------
 app.use(notFound)
 app.use(onError)
 
