@@ -91,10 +91,7 @@ app.use('/api', pushRoutes) // POST /api/push/register, /api/push/prefs, /api/pu
 app.use('/api', notificacionesRoutes) // GET /api/notificaciones, POST /api/notificaciones/:id/leer
 
 // Ruta de prueba (solo en desarrollo)
-if (env.NODE_ENV !== 'production' || process.env.TEST_PUSH === 'true') {
   app.use('/api', testPushRoutes) // POST /api/test-push
-  logger.info('✅ Ruta de prueba de push habilitada: POST /api/test-push')
-}
 
 // ---------------- Rutas principales ----------------
 app.use('/usuarios', usuariosRoutes)
