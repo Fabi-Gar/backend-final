@@ -16,7 +16,9 @@ import { contextMiddleware } from './middlewares/context'
 import { authMiddleware } from './middlewares/auth'
 
 // Módulos (de producción)
-import { pushRouter } from './modules/notificaciones/push.routes'
+import pushRoutes from './modules/notificaciones/push.routes'
+import notificacionesRoutes from './modules/notificaciones/push.routes';
+import testPushRoutes from './modules/notificaciones/testpush.routes';
 import firmsRoutes from './modules/geoespacial/firms.routes'
 import authRoutes from './modules/auth/auth.routes'
 import usuariosRoutes from './modules/seguridad/usuarios.routes'
@@ -81,7 +83,8 @@ app.use(authMiddleware)
 
 // ---------------- Rutas ----------------
 app.use('/auth', authRoutes)
-app.use('/push', pushRouter)
+app.use('/api', pushRoutes);
+app.use('/api', notificacionesRoutes);
 
 // /test opcional (solo si TEST_PUSH=true y el archivo existe)
 if (process.env.TEST_PUSH === 'true') {

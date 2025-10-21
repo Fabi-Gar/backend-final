@@ -2,7 +2,15 @@
 import { Router } from 'express';
 import { PushController } from './push.controller';
 
-export const pushRouter = Router();
-pushRouter.post('/register', PushController.register);
-pushRouter.post('/prefs', PushController.prefs);
-pushRouter.post('/unregister', PushController.unregister);
+const router = Router();
+
+// Registrar token y preferencias
+router.post('/push/register', PushController.register);
+
+// Actualizar solo preferencias
+router.put('/push/prefs', PushController.prefs);
+
+// Desactivar token
+router.post('/push/unregister', PushController.unregister);
+
+export default router;
