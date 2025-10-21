@@ -211,4 +211,122 @@ router.get('/my-push-config', guardAuth, async (req, res) => {
   }
 });
 
+// ✅ NUEVO: Limpiar tokens antiguos de Expo
+router.delete('/clean-expo-tokens', guardAuth, async (req, res) => {
+  try {
+    const userId = res.locals?.ctx?.user?.usuario_uuid;
+    
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: 'No autenticado' });
+    }
+
+    const prefs = await PushPrefsRepo.getByUserId(userId);
+    
+    if (!prefs || !prefs.tokens || prefs.tokens.length === 0) {
+      return res.json({ 
+        ok: true, 
+        message: 'No hay tokens para limpiar',
+        removed: 0
+      });
+    }
+
+    // Remover tokens de Expo uno por uno
+    const expoTokens = prefs.tokens.filter(t => t.token.startsWith('ExponentPushToken'));
+    
+    for (const tokenObj of expoTokens) {
+      await PushPrefsRepo.removeToken(userId, tokenObj.token);
+    }
+
+    res.json({ 
+      ok: true, 
+      message: `${expoTokens.length} token(s) de Expo eliminados`,
+      removed: expoTokens.length,
+      remaining: prefs.tokens.length - expoTokens.length
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// ✅ NUEVO: Eliminar TODOS mis tokens
+router.delete('/clean-all-tokens', guardAuth, async (req, res) => {
+  try {
+    const userId = res.locals?.ctx?.user?.usuario_uuid;
+    
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: 'No autenticado' });
+    }
+
+    const prefs = await PushPrefsRepo.getByUserId(userId);
+    
+    if (!prefs || !prefs.tokens || prefs.tokens.length === 0) {
+      return res.json({ 
+        ok: true, 
+        message: 'No hay tokens para eliminar',
+        removed: 0
+      });
+    }
+
+    // Remover todos los tokens uno por uno
+    const tokenCount = prefs.tokens.length;
+    for (const tokenObj of prefs.tokens) {
+      await PushPrefsRepo.removeToken(userId, tokenObj.token);
+    }
+
+    res.json({ 
+      ok: true, 
+      message: `${tokenCount} token(s) eliminados. Haz logout y login para registrar un nuevo token FCM.`,
+      removed: tokenCount
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// ✅ NUEVO: Re-registrar mi token FCM actual
+router.post('/reregister-token', guardAuth, async (req, res) => {
+  try {
+    const userId = res.locals?.ctx?.user?.usuario_uuid;
+    const { fcmToken } = req.body;
+    
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: 'No autenticado' });
+    }
+
+    if (!fcmToken) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Se requiere fcmToken en el body' 
+      });
+    }
+
+    // Limpiar todos los tokens antiguos primero
+    const prefs = await PushPrefsRepo.getByUserId(userId);
+    if (prefs && prefs.tokens && prefs.tokens.length > 0) {
+      for (const tokenObj of prefs.tokens) {
+        await PushPrefsRepo.removeToken(userId, tokenObj.token);
+      }
+    }
+
+    // Registrar el nuevo
+    const { PushService } = await import('./push.service');
+    await PushService.register({
+      userId,
+      expoPushToken: fcmToken,
+      avisarmeAprobado: true,
+      avisarmeActualizaciones: true,
+      avisarmeCierres: true,
+      municipiosSuscritos: [],
+      departamentosSuscritos: [],
+    });
+
+    res.json({ 
+      ok: true, 
+      message: 'Token FCM registrado exitosamente',
+      token: fcmToken.substring(0, 30) + '...'
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
 export default router;
