@@ -198,7 +198,7 @@ async function upsertPuntos(norm: ReturnType<typeof normalize>) {
       .createQueryBuilder()
       .insert()
       .values(slice)
-      .onConflict(`("hash_dedupe") DO UPDATE SET
+      .onConflict(`(hash_dedupe) WHERE hash_dedupe IS NOT NULL DO UPDATE SET
           daynight       = EXCLUDED.daynight,
           confidence     = EXCLUDED.confidence,
           frp            = EXCLUDED.frp,
