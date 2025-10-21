@@ -784,6 +784,7 @@ router.patch('/:uuid', guardAuth, async (req, res, next) => {
 })
 
 // -------------------- APROBAR --------------------
+// En incendios.routes.ts - endpoint PATCH /:uuid/aprobar
 router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => {
   try {
     const { uuid } = z.object({ uuid: z.string().uuid() }).parse(req.params)
@@ -791,7 +792,7 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
     
     const inc = await repo.findOne({ 
       where: { incendio_uuid: uuid, eliminado_en: IsNull() },
-      relations: ['creado_por'] // ✅ Cargar relación para tener datos
+      relations: ['creado_por'] // ✅ Cargar relación
     })
     if (!inc) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Incendio no existe' }, requestId: res.locals.ctx?.requestId })
 
@@ -805,6 +806,7 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
     ;(inc as any).motivo_rechazo = null
 
     const saved = await repo.save(inc)
+    
     await auditRecord({
       tabla: 'incendios',
       registro_uuid: saved.incendio_uuid,
@@ -814,34 +816,42 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
       ctx: res.locals.ctx
     })
 
-    // ✅ NOTIFICACIÓN 1: Al creador que su incendio fue aprobado
+    // ✅ FIX 1: Notificar al creador
     try {
-      await notifyIncendioAprobado({
-        id: saved.incendio_uuid,
-        titulo: saved.titulo ?? undefined,
-        creadorUserId: (saved as any).creado_por_uuid,
-      })
+      const creadorUserId = inc.creado_por?.usuario_uuid
 
-      // Guardar en BD
-      const notiRepo = AppDataSource.getRepository(Notificacion)
-      await notiRepo.save({
-        usuario_uuid: (saved as any).creado_por_uuid,
-        tipo: 'incendio_aprobado',
-        payload: {
-          incendio_id: saved.incendio_uuid,
-          titulo: saved.titulo,
-        },
-        leida_en: null,
-      })
+      if (!creadorUserId) {
+        console.error('❌ No se pudo obtener creado_por_uuid del incendio')
+      } else {
+        await notifyIncendioAprobado({
+          id: saved.incendio_uuid,
+          titulo: saved.titulo ?? undefined,
+          creadorUserId: creadorUserId,
+        })
+
+        // Guardar en BD
+        const notiRepo = AppDataSource.getRepository(Notificacion)
+        await notiRepo.save({
+          usuario_uuid: creadorUserId,
+          tipo: 'incendio_aprobado',
+          titulo: '✅ Tu incendio fue aprobado',
+          mensaje: `"${saved.titulo}" ha sido aprobado por un administrador`,
+          payload: {
+            incendio_id: saved.incendio_uuid,
+            titulo: saved.titulo,
+          },
+        })
+        console.log('✅ Notificación de aprobación enviada al creador')
+      }
     } catch (notifError) {
       console.error('[notificacion] Error notificando aprobación:', notifError)
     }
 
-    // ✅ NOTIFICACIÓN 2: A usuarios del municipio
+    // ✅ FIX 2: Notificar a usuarios del municipio (usando UUID)
     try {
-      // Obtener municipio del último reporte
+      // Obtener municipio_uuid del último reporte
       const reporteData = await AppDataSource.query(
-        `SELECT r.municipio_uuid, m.codigo, m.nombre
+        `SELECT r.municipio_uuid, m.nombre
          FROM reportes r
          LEFT JOIN municipios m ON m.municipio_uuid = r.municipio_uuid
          WHERE r.incendio_uuid = $1 AND r.eliminado_en IS NULL
@@ -850,13 +860,15 @@ router.patch('/:uuid/aprobar', guardAuth, guardAdmin, async (req, res, next) => 
         [saved.incendio_uuid]
       )
 
-      if (reporteData?.[0]?.codigo) {
+      if (reporteData?.[0]?.municipio_uuid) {
+        // Usar municipio_uuid como identificador
         await notifyIncendioNuevoMunicipio({
           id: saved.incendio_uuid,
           titulo: saved.titulo ?? undefined,
-          municipioCode: reporteData[0].codigo,
-          ubicacion: reporteData[0].nombre,
+          municipioCode: reporteData[0].municipio_uuid, // ✅ Usar UUID
+          ubicacion: reporteData[0].nombre || 'Sin ubicación',
         })
+        console.log(`✅ Notificación enviada a usuarios del municipio: ${reporteData[0].nombre}`)
       }
     } catch (notifError) {
       console.error('[notificacion] Error notificando región:', notifError)
