@@ -88,7 +88,7 @@ app.use('/auth', authRoutes)
 
 // ---------------- Rutas de notificaciones push ----------------
 app.use('/api', pushRoutes) // POST /api/push/register, /api/push/prefs, /api/push/unregister
-app.use('/api', notificacionesRoutes) // GET /api/notificaciones, POST /api/notificaciones/:id/leer
+app.use(notificacionesRoutes) // GET /api/notificaciones, POST /api/notificaciones/:id/leer
 
 // Ruta de prueba (solo en desarrollo)
   app.use('/api', testPushRoutes) // POST /api/test-push
