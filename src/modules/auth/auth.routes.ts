@@ -163,9 +163,15 @@ router.post('/login', async (req, res, next) => {
 
     // ✅ Registrar/actualizar token push si viene
     if (expoPushToken) {
+      console.log('🔔 Intentando registrar token push:', {
+        userId: user.usuario_uuid,
+        token: expoPushToken.substring(0, 30) + '...',
+      });
+      
       try {
         const { PushService } = await import('../notificaciones/push.service')
-        await PushService.register({
+        
+        const result = await PushService.register({
           userId: user.usuario_uuid,
           expoPushToken,
           avisarmeAprobado: true,
@@ -173,14 +179,14 @@ router.post('/login', async (req, res, next) => {
           avisarmeCierres: true,
           municipiosSuscritos: [],
           departamentosSuscritos: [],
-        })
-        console.log(`✅ Token push actualizado para: ${user.email}`)
+        });
+        
+        console.log('✅ Token push registrado exitosamente:', result);
       } catch (err) {
-        console.error('⚠️ Error registrando token push en login:', err)
+        console.error('❌ Error registrando token push en login:', err);
         // No fallar el login si falla el token
       }
     }
-
     res.json({
       token,
       user: {
