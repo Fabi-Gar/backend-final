@@ -329,4 +329,57 @@ router.post('/reregister-token', guardAuth, async (req, res) => {
     res.status(500).json({ ok: false, error: e?.message });
   }
 });
+
+// ✅ NUEVO: Ver mis tokens actuales
+router.get('/my-tokens', guardAuth, async (req, res) => {
+  try {
+    const userId = res.locals?.ctx?.user?.usuario_uuid;
+    
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: 'No autenticado' });
+    }
+
+    const prefs = await PushPrefsRepo.getByUserId(userId);
+    
+    if (!prefs) {
+      return res.json({ 
+        ok: true, 
+        tokens: [],
+        message: 'No tienes tokens registrados'
+      });
+    }
+
+    // Separar tokens por tipo
+    const fcmTokens = (prefs.tokens || [])
+      .filter((t: any) => !t.token.startsWith('ExponentPushToken'))
+      .map((t: any) => ({
+        token: t.token.substring(0, 30) + '...',
+        tipo: 'FCM',
+        active: t.active,
+        created: t.createdAt
+      }));
+
+    const expoTokens = (prefs.tokens || [])
+      .filter((t: any) => t.token.startsWith('ExponentPushToken'))
+      .map((t: any) => ({
+        token: t.token.substring(0, 30) + '...',
+        tipo: 'Expo (obsoleto)',
+        active: t.active,
+        created: t.createdAt
+      }));
+
+    res.json({ 
+      ok: true,
+      userId,
+      fcmTokens,
+      expoTokens,
+      total: fcmTokens.length + expoTokens.length,
+      warning: expoTokens.length > 0 ? 'Tienes tokens de Expo obsoletos que deberías limpiar' : null
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+
 export default router;
