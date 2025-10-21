@@ -84,10 +84,7 @@ app.use('/auth', auth_routes_1.default);
 app.use('/api', push_routes_1.default); // POST /api/push/register, /api/push/prefs, /api/push/unregister
 app.use('/api', notificaciones_routes_1.default); // GET /api/notificaciones, POST /api/notificaciones/:id/leer
 // Ruta de prueba (solo en desarrollo)
-if (env_1.default.NODE_ENV !== 'production' || process.env.TEST_PUSH === 'true') {
-    app.use('/api', testpush_routes_1.default); // POST /api/test-push
-    logger.info('✅ Ruta de prueba de push habilitada: POST /api/test-push');
-}
+app.use('/api', testpush_routes_1.default); // POST /api/test-push
 // ---------------- Rutas principales ----------------
 app.use('/usuarios', usuarios_routes_1.default);
 app.use('/incendios', incendios_routes_1.default);

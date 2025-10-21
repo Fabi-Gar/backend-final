@@ -10,7 +10,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PuntoCalor = void 0;
-// src/modules/firms/entities/punto-calor.entity.ts (tu archivo)
+// src/modules/firms/entities/punto-calor.entity.ts
 const typeorm_1 = require("typeorm");
 const incendio_entity_1 = require("../../incendios/entities/incendio.entity");
 let PuntoCalor = class PuntoCalor {
@@ -129,5 +129,6 @@ __decorate([
 ], PuntoCalor.prototype, "eliminado_en", void 0);
 exports.PuntoCalor = PuntoCalor = __decorate([
     (0, typeorm_1.Entity)('puntos_calor'),
-    (0, typeorm_1.Index)('idx_puntos_calor_fecha', ['acq_date'])
+    (0, typeorm_1.Index)('idx_puntos_calor_fecha', ['acq_date']),
+    (0, typeorm_1.Index)('idx_puntos_calor_hash_dedupe', ['hash_dedupe'], { unique: true }) // ← AGREGAR ESTO
 ], PuntoCalor);
