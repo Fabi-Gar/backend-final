@@ -8,7 +8,7 @@ const router = Router();
 router.post('/push/register', PushController.register);
 
 // Actualizar solo preferencias
-router.put('/push/prefs', PushController.prefs);
+router.post('/push/prefs', PushController.prefs);
 
 // Desactivar token
 router.post('/push/unregister', PushController.unregister);
