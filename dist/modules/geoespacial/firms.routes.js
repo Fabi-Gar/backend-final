@@ -142,76 +142,68 @@ router.get('/puntos', async (req, res, next) => {
             qb = qb.orderBy('p.acq_date', 'DESC')
                 .addOrderBy('p.acq_time', 'DESC');
         }
-        // consulta paginada
+        // consulta paginada principal
         const [items, total] = await qb.skip(offset).take(limit).getManyAndCount();
+        // === NUEVO: obtener lon/lat reales por id ===
+        const ids = items.map(it => it.punto_calor_uuid);
+        const rawCoords = ids.length
+            ? await repo.createQueryBuilder('p')
+                .select([
+                'p.punto_calor_uuid AS id',
+                'ST_X(p.geom) AS lon',
+                'ST_Y(p.geom) AS lat',
+            ])
+                .where('p.punto_calor_uuid IN (:...ids)', { ids })
+                .getRawMany()
+            : [];
+        const coordMap = new Map(rawCoords.map((r) => [r.id, { lon: Number(r.lon), lat: Number(r.lat) }]));
         // respuesta lista (no geojson)
         if (!asGeo) {
             return res.json({
                 total,
                 page,
                 pageSize: limit,
-                items: items.map(it => ({
-                    id: it.punto_calor_uuid,
-                    source: it.fuente ?? it.source ?? 'FIRMS',
-                    sourceId: it.hash_dedupe ?? it.punto_calor_uuid,
-                    acqTime: `${it.acq_date} ${String(Math.floor(it.acq_time / 100)).padStart(2, '0')}:${String(it.acq_time % 100).padStart(2, '0')}:00Z`,
-                    confidence: it.confidence == null ? null : Number(it.confidence),
-                    frp: it.frp == null ? null : Number(it.frp),
-                    lon: undefined,
-                    lat: undefined
-                })),
+                items: items.map(it => {
+                    const c = coordMap.get(it.punto_calor_uuid);
+                    return {
+                        id: it.punto_calor_uuid,
+                        source: it.fuente ?? it.source ?? 'FIRMS',
+                        sourceId: it.hash_dedupe ?? it.punto_calor_uuid,
+                        acqTime: `${it.acq_date} ${String(Math.floor(it.acq_time / 100)).padStart(2, '0')}:${String(it.acq_time % 100).padStart(2, '0')}:00Z`,
+                        confidence: it.confidence == null ? null : Number(it.confidence),
+                        frp: it.frp == null ? null : Number(it.frp),
+                        lon: c?.lon ?? null,
+                        lat: c?.lat ?? null,
+                    };
+                }),
                 window: { start: '', end: '' }
             });
         }
-        // GeoJSON (sin ST_X/ST_Y por performance; activa el bloque raw si necesitas coords)
+        // GeoJSON con coords reales (orden preservado por 'items')
         const fc = {
             type: 'FeatureCollection',
-            features: items.map(it => ({
-                type: 'Feature',
-                id: it.punto_calor_uuid,
-                geometry: { type: 'Point', coordinates: [0, 0] },
-                properties: {
-                    source: it.fuente ?? it.source ?? 'FIRMS',
-                    sourceId: it.hash_dedupe ?? it.punto_calor_uuid,
-                    acqTime: `${it.acq_date} ${String(Math.floor(it.acq_time / 100)).padStart(2, '0')}:${String(it.acq_time % 100).padStart(2, '0')}:00Z`,
-                    confidence: it.confidence == null ? null : Number(it.confidence),
-                    frp: it.frp == null ? null : Number(it.frp)
-                }
-            }))
+            features: items.map(it => {
+                const c = coordMap.get(it.punto_calor_uuid);
+                return {
+                    type: 'Feature',
+                    id: it.punto_calor_uuid,
+                    geometry: {
+                        type: 'Point',
+                        coordinates: [
+                            c?.lon ?? 0,
+                            c?.lat ?? 0,
+                        ],
+                    },
+                    properties: {
+                        source: it.fuente ?? it.source ?? 'FIRMS',
+                        sourceId: it.hash_dedupe ?? it.punto_calor_uuid,
+                        acqTime: `${it.acq_date} ${String(Math.floor(it.acq_time / 100)).padStart(2, '0')}:${String(it.acq_time % 100).padStart(2, '0')}:00Z`,
+                        confidence: it.confidence == null ? null : Number(it.confidence),
+                        frp: it.frp == null ? null : Number(it.frp),
+                    }
+                };
+            })
         };
-        // --- Variante con coords reales (si las necesitas), descomenta:
-        // const rows = await repo.createQueryBuilder('p')
-        //   .select([
-        //     'p.punto_calor_uuid AS id',
-        //     'p.fuente AS source',
-        //     'p.hash_dedupe AS sourceId',
-        //     "to_char(to_timestamp(p.acq_date || ' ' || lpad((p.acq_time/100)::int::text,2,'0') || ':' || lpad((p.acq_time%100)::int::text,2,'0'),'YYYY-MM-DD HH24:MI'),'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS acqTime",
-        //     'p.confidence',
-        //     'p.frp',
-        //     'ST_X(p.geom) AS lon',
-        //     'ST_Y(p.geom) AS lat'
-        //   ])
-        //   .where(qb.expressionMap.wheres.map(w => w.condition).join(' AND '))
-        //   .setParameters(qb.getParameters())
-        //   .orderBy(qb.expressionMap.orderBys)
-        //   .offset(offset)
-        //   .limit(limit)
-        //   .getRawMany()
-        // const fc = {
-        //   type: 'FeatureCollection' as const,
-        //   features: rows.map(r => ({
-        //     type: 'Feature' as const,
-        //     id: r.id,
-        //     geometry: { type: 'Point' as const, coordinates: [Number(r.lon), Number(r.lat)] as [number, number] },
-        //     properties: {
-        //       source: r.source,
-        //       sourceId: r.sourceid ?? r.id,
-        //       acqTime: r.acqtime,
-        //       confidence: r.confidence == null ? null : Number(r.confidence),
-        //       frp: r.frp == null ? null : Number(r.frp)
-        //     }
-        //   }))
-        // }
         return res.json({ total, page, pageSize: limit, items: fc });
     }
     catch (e) {

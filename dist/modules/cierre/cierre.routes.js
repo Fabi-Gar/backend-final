@@ -6,6 +6,9 @@ const zod_1 = require("zod");
 const data_source_1 = require("../../db/data-source");
 const auth_1 = require("../../middlewares/auth");
 const auditoria_service_1 = require("../auditoria/auditoria.service");
+const incendioNotify_service_1 = require("../notificaciones/incendioNotify.service");
+const cierreNotify_service_1 = require("../notificaciones/cierreNotify.service");
+const notificacion_entity_1 = require("../notificaciones/entities/notificacion.entity");
 const router = (0, express_1.Router)();
 // ================== UTIL: validadores simples ==================
 const patchCantidad = zod_1.z.object({ cantidad: zod_1.z.number().min(0) });
@@ -22,6 +25,17 @@ async function getIncendioBasic(uuid) {
     const rows = await data_source_1.AppDataSource.query(`SELECT incendio_uuid, creado_por_uuid FROM incendios
      WHERE incendio_uuid = $1 AND eliminado_en IS NULL`, [uuid]);
     return rows?.[0] || null;
+}
+function estadoDesdeSecuencia(sc) {
+    if (!sc)
+        return 'Pendiente';
+    if (sc.extinguido_at)
+        return 'Extinguido';
+    if (sc.controlado_at)
+        return 'Controlado';
+    if (sc.llegada_medios_terrestres_at || sc.llegada_medios_aereos_at)
+        return 'En atención';
+    return 'Pendiente';
 }
 async function isClosed(incendio_uuid) {
     const r = await data_source_1.AppDataSource.query(`SELECT extinguido_at FROM cierre_secuencia_control
@@ -230,6 +244,11 @@ router.patch('/:incendio_uuid/catalogos', auth_1.guardAuth, async (req, res, nex
              eliminado_en = NULL,
              actualizado_en = now()`, [incendio_uuid, m.medio_terrestre_id, m.cantidad ?? 1]);
             }
+            // Autocompletar llegada de medios terrestres si estaba vacío
+            await data_source_1.AppDataSource.query(`UPDATE cierre_secuencia_control
+         SET llegada_medios_terrestres_at = COALESCE(llegada_medios_terrestres_at, now()),
+             actualizado_en = now()
+         WHERE incendio_uuid = $1 AND eliminado_en IS NULL`, [incendio_uuid]);
             updatesFeed.push('Medios terrestres actualizados');
             auditAfter.medios_terrestres = body.medios_terrestres;
         }
@@ -242,6 +261,11 @@ router.patch('/:incendio_uuid/catalogos', auth_1.guardAuth, async (req, res, nex
              eliminado_en = NULL,
              actualizado_en = now()`, [incendio_uuid, m.medio_aereo_id, String(m.pct)]);
             }
+            // Autocompletar llegada de medios aéreos si estaba vacío
+            await data_source_1.AppDataSource.query(`UPDATE cierre_secuencia_control
+         SET llegada_medios_aereos_at = COALESCE(llegada_medios_aereos_at, now()),
+             actualizado_en = now()
+         WHERE incendio_uuid = $1 AND eliminado_en IS NULL`, [incendio_uuid]);
             updatesFeed.push('Medios aéreos actualizados');
             auditAfter.medios_aereos = body.medios_aereos;
         }
@@ -323,12 +347,65 @@ router.patch('/:incendio_uuid/catalogos', auth_1.guardAuth, async (req, res, nex
                 ctx: res.locals.ctx
             });
         }
+        if (updatesFeed.length > 0) {
+            try {
+                const incData = await data_source_1.AppDataSource.query(`SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+           FROM incendios i
+           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`, [incendio_uuid]);
+                if (incData?.[0]) {
+                    const inc = incData[0];
+                    await (0, cierreNotify_service_1.notifyCierreEvento)({
+                        type: 'cierre_actualizado',
+                        incendio: {
+                            id: inc.incendio_uuid,
+                            titulo: inc.titulo,
+                            creadorUserId: inc.creado_por_uuid,
+                            seguidoresUserIds: [], // TODO: Agregar seguidores
+                        },
+                        autorNombre: res.locals.ctx?.user?.nombre || 'Usuario',
+                        resumen: updatesFeed[0], // Primera actualización como resumen
+                    });
+                }
+            }
+            catch (notifError) {
+                console.error('[notificacion] Error notificando actualización cierre:', notifError);
+            }
+        }
         return res.json({ ok: true });
     }
     catch (e) {
-        if (e?.issues)
+        // Zod / validación
+        if (e?.issues) {
             return res.status(400).json({ code: 'BAD_REQUEST', issues: e.issues });
-        next(e);
+        }
+        // TypeORM / PG
+        const d = e?.driverError ?? e;
+        if (d?.code) {
+            // Mapeo de mensajes amigables por constraint (ajusta nombres reales)
+            const friendlyByConstraint = {};
+            const base = {
+                code: 'DB_ERROR',
+                pg_code: d.code,
+                table: d.table ?? null,
+                constraint: d.constraint ?? null,
+                detail: d.detail ?? null,
+                hint: d.hint ?? null,
+                traceId: res.locals?.ctx?.requestId ?? null,
+            };
+            if (d.code === '23503') {
+                const friendly = (d.constraint && friendlyByConstraint[d.constraint]) ||
+                    'Violación de llave foránea: algún id de catálogo no existe.';
+                return res.status(422).json({ ...base, message: friendly });
+            }
+            if (d.code === '23505') {
+                return res.status(409).json({ ...base, message: 'Registro duplicado (unique_violation).' });
+            }
+            if (d.code === '23502') {
+                return res.status(400).json({ ...base, message: 'Campo requerido es NULL (not_null_violation).' });
+            }
+            return res.status(400).json({ ...base, message: 'Error de base de datos.' });
+        }
+        return next(e);
     }
 });
 // ================== POST /:incendio_uuid/finalizar ==================
@@ -337,7 +414,7 @@ router.post('/:incendio_uuid/finalizar', auth_1.guardAuth, auth_1.guardAdmin, as
         const { incendio_uuid } = zod_1.z.object({ incendio_uuid: zod_1.z.string().uuid() }).parse(req.params);
         const user = (res.locals?.ctx?.user || {});
         await ensureBaseRecords(incendio_uuid);
-        const prev = await data_source_1.AppDataSource.query(`SELECT extinguido_at
+        const prev = await data_source_1.AppDataSource.query(`SELECT controlado_at, extinguido_at
        FROM cierre_secuencia_control
        WHERE incendio_uuid = $1
          AND eliminado_en IS NULL`, [incendio_uuid]);
@@ -345,11 +422,12 @@ router.post('/:incendio_uuid/finalizar', auth_1.guardAuth, auth_1.guardAdmin, as
         let finalDate = prev?.[0]?.extinguido_at || null;
         if (!alreadyClosed) {
             const rows = await data_source_1.AppDataSource.query(`UPDATE cierre_secuencia_control
-         SET extinguido_at = now(),
+         SET controlado_at = COALESCE(controlado_at, now()),
+             extinguido_at = now(),
              actualizado_en = now()
          WHERE incendio_uuid = $1
            AND eliminado_en IS NULL
-         RETURNING extinguido_at`, [incendio_uuid]);
+         RETURNING controlado_at, extinguido_at`, [incendio_uuid]);
             finalDate = rows?.[0]?.extinguido_at || null;
             await data_source_1.AppDataSource.query(`INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
          VALUES ($1, 'EXTINGUIDO', 'Incendio extinguido', $2)`, [incendio_uuid, user?.usuario_uuid ?? null]);
@@ -363,8 +441,116 @@ router.post('/:incendio_uuid/finalizar', auth_1.guardAuth, auth_1.guardAdmin, as
                 despues: { extinguido_at: finalDate },
                 ctx: res.locals.ctx
             });
+            // ✅ NOTIFICAR CIERRE A PARTICIPANTES Y REGIÓN
+            try {
+                // Obtener info del incendio
+                const incData = await data_source_1.AppDataSource.query(`SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+           FROM incendios i
+           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`, [incendio_uuid]);
+                if (incData?.[0]) {
+                    const inc = incData[0];
+                    // Notificar a creador (y seguidores si los tienes)
+                    await (0, incendioNotify_service_1.notifyIncendioCerrado)({
+                        id: inc.incendio_uuid,
+                        titulo: inc.titulo,
+                        creadorUserId: inc.creado_por_uuid,
+                        seguidoresUserIds: [], // TODO: Agregar seguidores si los tienes
+                        resumenCierre: 'El incendio ha sido extinguido',
+                    });
+                    // Guardar notificación en BD
+                    const notiRepo = data_source_1.AppDataSource.getRepository(notificacion_entity_1.Notificacion);
+                    await notiRepo.save({
+                        usuario_uuid: inc.creado_por_uuid,
+                        tipo: 'incendio_cerrado',
+                        payload: {
+                            incendio_id: inc.incendio_uuid,
+                            extinguido_at: finalDate,
+                        },
+                        leida_en: null,
+                    });
+                    // Notificar a la región (municipio)
+                    const reporteData = await data_source_1.AppDataSource.query(`SELECT r.municipio_uuid, m.codigo
+             FROM reportes r
+             LEFT JOIN municipios m ON m.municipio_uuid = r.municipio_uuid
+             WHERE r.incendio_uuid = $1 AND r.eliminado_en IS NULL
+             ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC
+             LIMIT 1`, [incendio_uuid]);
+                    if (reporteData?.[0]?.codigo) {
+                        const { notifyCierreFinalizadoARegion } = require('../notificaciones/cierreNotify.service');
+                        await notifyCierreFinalizadoARegion({
+                            incendio: {
+                                id: inc.incendio_uuid,
+                                titulo: inc.titulo,
+                                regionCode: reporteData[0].codigo, // código del municipio
+                            },
+                        });
+                    }
+                }
+            }
+            catch (notifError) {
+                console.error('[notificacion] Error notificando cierre:', notifError);
+            }
         }
         return res.json({ ok: true, extinguido_at: finalDate, alreadyClosed });
+    }
+    catch (e) {
+        next(e);
+    }
+});
+router.get('/estados', auth_1.guardAuth, async (req, res, next) => {
+    try {
+        // ids=uuid1,uuid2,...
+        const raw = String(req.query.ids || '').trim();
+        if (!raw)
+            return res.status(400).json({ code: 'BAD_REQUEST', message: 'Falta query param ids' });
+        // normaliza lista y valida UUIDs
+        const parts = Array.from(new Set(raw.split(',').map(s => s.trim()).filter(Boolean)));
+        try {
+            zod_1.z.array(zod_1.z.string().uuid()).min(1).max(500).parse(parts);
+        }
+        catch {
+            return res.status(400).json({ code: 'BAD_REQUEST', message: 'ids debe contener UUIDs válidos (1..500)' });
+        }
+        // trae las marcas de tiempo de cierre en batch
+        const rows = await data_source_1.AppDataSource.query(`SELECT incendio_uuid,
+              llegada_medios_terrestres_at,
+              llegada_medios_aereos_at,
+              controlado_at,
+              extinguido_at
+       FROM cierre_secuencia_control
+       WHERE incendio_uuid = ANY($1::uuid[])
+         AND eliminado_en IS NULL`, [parts]);
+        // indexa resultados
+        const byId = {};
+        for (const r of rows) {
+            const sc = {
+                llegada_medios_terrestres_at: r.llegada_medios_terrestres_at ? new Date(r.llegada_medios_terrestres_at).toISOString() : null,
+                llegada_medios_aereos_at: r.llegada_medios_aereos_at ? new Date(r.llegada_medios_aereos_at).toISOString() : null,
+                controlado_at: r.controlado_at ? new Date(r.controlado_at).toISOString() : null,
+                extinguido_at: r.extinguido_at ? new Date(r.extinguido_at).toISOString() : null,
+            };
+            byId[r.incendio_uuid] = {
+                estado: estadoDesdeSecuencia(sc),
+                secuencia_control: sc
+            };
+        }
+        // para los que no tienen fila (no inicializado): estado = Pendiente
+        for (const id of parts) {
+            if (!byId[id]) {
+                byId[id] = {
+                    estado: 'Pendiente',
+                    secuencia_control: {
+                        llegada_medios_terrestres_at: null,
+                        llegada_medios_aereos_at: null,
+                        controlado_at: null,
+                        extinguido_at: null
+                    }
+                };
+            }
+        }
+        // respuesta amigable: mapa + arreglo
+        const items = parts.map((id) => ({ incendio_uuid: id, ...byId[id] }));
+        return res.json({ total: items.length, items, byId });
     }
     catch (e) {
         next(e);
@@ -379,7 +565,12 @@ router.get('/:incendio_uuid', auth_1.guardAuth, async (req, res, next) => {
        WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`, [incendio_uuid]);
         if (!inc?.length)
             return res.status(404).json({ code: 'NOT_FOUND' });
-        const [ops] = await data_source_1.AppDataSource.query(`SELECT tipo_incendio_principal_id FROM cierre_operaciones WHERE incendio_uuid=$1 AND eliminado_en IS NULL`, [incendio_uuid]);
+        const [ops] = await data_source_1.AppDataSource.query(`SELECT o.tipo_incendio_principal_id,
+              t.nombre AS tipo_incendio_principal_nombre
+       FROM cierre_operaciones o
+       LEFT JOIN tipos_incendio t
+         ON t.tipo_incendio_id = o.tipo_incendio_principal_id
+       WHERE o.incendio_uuid=$1 AND o.eliminado_en IS NULL`, [incendio_uuid]);
         const [topo] = await data_source_1.AppDataSource.query(`SELECT plano_pct, ondulado_pct, quebrado_pct FROM cierre_topografia WHERE incendio_uuid=$1 AND eliminado_en IS NULL`, [incendio_uuid]);
         const [sup] = await data_source_1.AppDataSource.query(`SELECT area_total_ha, dentro_ap_ha, fuera_ap_ha, nombre_ap FROM cierre_superficie WHERE incendio_uuid=$1 AND eliminado_en IS NULL`, [incendio_uuid]);
         const [seq] = await data_source_1.AppDataSource.query(`SELECT llegada_medios_terrestres_at, llegada_medios_aereos_at, controlado_at, extinguido_at
@@ -387,7 +578,7 @@ router.get('/:incendio_uuid', auth_1.guardAuth, async (req, res, next) => {
         const [meteo] = await data_source_1.AppDataSource.query(`SELECT temp_c, hr_pct, viento_vel, viento_dir FROM cierre_meteorologia WHERE incendio_uuid=$1 AND eliminado_en IS NULL`, [incendio_uuid]);
         const compTipo = await data_source_1.AppDataSource.query(`SELECT c.tipo_incendio_id, t.nombre AS tipo_incendio_nombre, c.pct::float
        FROM cierre_composicion_tipo c
-       JOIN tipos_incendio t ON t.tipo_incendio_id = c.tipo_incendio_id   -- 👈 ajuste aquí
+       JOIN tipos_incendio t ON t.tipo_incendio_id = c.tipo_incendio_id
        WHERE c.incendio_uuid=$1 AND c.eliminado_en IS NULL
        ORDER BY t.nombre ASC`, [incendio_uuid]);
         const propiedad = await data_source_1.AppDataSource.query(`SELECT p.tipo_propiedad_id, tp.nombre AS tipo_propiedad_nombre, p.usado
@@ -449,11 +640,29 @@ router.get('/:incendio_uuid', auth_1.guardAuth, async (req, res, next) => {
          AND a.eliminado_en IS NULL
        ORDER BY a.creado_en DESC
        LIMIT 20`, [incendio_uuid]);
+        // ---- calcular estado de cierre a partir de la secuencia ----
+        const estadoDesdeSecuencia = (sc) => {
+            if (!sc)
+                return 'Pendiente';
+            const { llegada_medios_terrestres_at, llegada_medios_aereos_at, controlado_at, extinguido_at } = sc;
+            if (extinguido_at)
+                return 'Extinguido';
+            if (controlado_at)
+                return 'Controlado';
+            if (llegada_medios_terrestres_at || llegada_medios_aereos_at)
+                return 'En atención';
+            return 'Pendiente';
+        };
         const cerrado = !!seq?.extinguido_at;
+        const estado_cierre = estadoDesdeSecuencia(seq || undefined);
         return res.json({
             incendio_uuid,
             cerrado,
-            tipo_incendio_principal_id: ops?.tipo_incendio_principal_id ?? null,
+            estado_cierre, // 👈 nuevo campo calculado
+            tipo_incendio_principal: ops?.tipo_incendio_principal_id ? {
+                id: ops.tipo_incendio_principal_id,
+                nombre: ops.tipo_incendio_principal_nombre || null
+            } : null,
             composicion_tipo: compTipo,
             topografia: topo ?? null,
             propiedad,
@@ -478,12 +687,10 @@ router.get('/:incendio_uuid', auth_1.guardAuth, async (req, res, next) => {
         next(e);
     }
 });
-// Agrega esto en src/modules/cierre/cierre.routes.ts
 router.post('/init', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid } = zod_1.z.object({ incendio_uuid: zod_1.z.string().uuid() }).parse(req.body);
         const user = (res.locals?.ctx?.user || {});
-        // validar incendio y permisos
         const inc = await getIncendioBasic(incendio_uuid);
         if (!inc)
             return res.status(404).json({ code: 'NOT_FOUND' });
@@ -491,12 +698,9 @@ router.post('/init', auth_1.guardAuth, async (req, res, next) => {
         if (!canEdit(user, inc.creado_por_uuid, closed)) {
             return res.status(403).json({ code: closed ? 'CERRADO_SOLO_ADMIN' : 'PERMISSION_DENIED' });
         }
-        // ¿ya existía algún registro base?
         const existing = await data_source_1.AppDataSource.query(`SELECT 1 FROM cierre_operaciones WHERE incendio_uuid=$1 AND eliminado_en IS NULL`, [incendio_uuid]);
         const alreadyInitialized = !!existing?.length;
-        // crea base (idempotente)
         await ensureBaseRecords(incendio_uuid);
-        // primera vez: deja huella en timeline
         if (!alreadyInitialized) {
             await data_source_1.AppDataSource.query(`INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
          VALUES ($1,'CIERRE_INICIADO','Se inició el cierre del incendio',$2)`, [incendio_uuid, user?.usuario_uuid ?? null]);
@@ -508,6 +712,38 @@ router.post('/init', auth_1.guardAuth, async (req, res, next) => {
                 despues: { incendio_uuid },
                 ctx: res.locals.ctx
             });
+            // ✅ NOTIFICAR INICIO DE CIERRE
+            try {
+                const incData = await data_source_1.AppDataSource.query(`SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+           FROM incendios i
+           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`, [incendio_uuid]);
+                if (incData?.[0]) {
+                    const inc = incData[0];
+                    await (0, cierreNotify_service_1.notifyCierreEvento)({
+                        type: 'cierre_iniciado',
+                        incendio: {
+                            id: inc.incendio_uuid,
+                            titulo: inc.titulo,
+                            creadorUserId: inc.creado_por_uuid,
+                            seguidoresUserIds: [], // TODO: Agregar seguidores
+                        },
+                        autorNombre: res.locals.ctx?.user?.nombre || 'Usuario',
+                    });
+                    // Guardar en BD
+                    const notiRepo = data_source_1.AppDataSource.getRepository(notificacion_entity_1.Notificacion);
+                    await notiRepo.save({
+                        usuario_uuid: inc.creado_por_uuid,
+                        tipo: 'cierre_iniciado',
+                        payload: {
+                            incendio_id: inc.incendio_uuid,
+                        },
+                        leida_en: null,
+                    });
+                }
+            }
+            catch (notifError) {
+                console.error('[notificacion] Error notificando inicio cierre:', notifError);
+            }
         }
         return res.status(201).json({
             ok: true,
@@ -525,27 +761,21 @@ router.post('/:incendio_uuid/reabrir', auth_1.guardAuth, auth_1.guardAdmin, asyn
     try {
         const { incendio_uuid } = zod_1.z.object({ incendio_uuid: zod_1.z.string().uuid() }).parse(req.params);
         const user = (res.locals?.ctx?.user || {});
-        // asegura filas base
         await ensureBaseRecords(incendio_uuid);
-        // estado previo
         const prev = await data_source_1.AppDataSource.query(`SELECT extinguido_at
        FROM cierre_secuencia_control
        WHERE incendio_uuid = $1 AND eliminado_en IS NULL`, [incendio_uuid]);
         const wasClosed = !!prev?.[0]?.extinguido_at;
-        // si ya estaba abierto, idempotente
         if (!wasClosed) {
             return res.json({ ok: true, reopened: false, message: 'Ya estaba abierto' });
         }
-        // abrir: set extinguido_at = NULL
         await data_source_1.AppDataSource.query(`UPDATE cierre_secuencia_control
        SET extinguido_at = NULL,
            actualizado_en = now()
        WHERE incendio_uuid = $1
          AND eliminado_en IS NULL`, [incendio_uuid]);
-        // timeline
         await data_source_1.AppDataSource.query(`INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1, 'CIERRE_ACTUALIZADO', 'Incendio reabierto para edición', $2)`, [incendio_uuid, user?.usuario_uuid ?? null]);
-        // auditoría
         await (0, auditoria_service_1.auditRecord)({
             tabla: 'cierre_secuencia_control',
             registro_uuid: incendio_uuid,
@@ -560,7 +790,7 @@ router.post('/:incendio_uuid/reabrir', auth_1.guardAuth, auth_1.guardAdmin, asyn
         next(e);
     }
 });
-// ---------- MEDIOS TERRESTRES (comp PK: incendio_uuid, medio_terrestre_id)
+// ---------- MEDIOS TERRESTRES
 router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, medio_terrestre_id } = zod_1.z.object({
@@ -581,6 +811,11 @@ router.patch('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', auth_1.gua
        RETURNING medio_terrestre_id`, [cantidad, incendio_uuid, medio_terrestre_id]);
         if (!rows.length)
             return res.status(404).json({ code: 'NOT_FOUND' });
+        // Autocompletar llegada de medios terrestres si estaba vacío
+        await data_source_1.AppDataSource.query(`UPDATE cierre_secuencia_control
+       SET llegada_medios_terrestres_at = COALESCE(llegada_medios_terrestres_at, now()),
+           actualizado_en = now()
+       WHERE incendio_uuid = $1 AND eliminado_en IS NULL`, [incendio_uuid]);
         await data_source_1.AppDataSource.query(`INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio terrestre actualizado',$2)`, [incendio_uuid, user?.usuario_uuid ?? null]);
         res.json({ ok: true });
@@ -616,7 +851,7 @@ router.delete('/:incendio_uuid/medios-terrestres/:medio_terrestre_id', auth_1.gu
         next(e);
     }
 });
-// ---------- MEDIOS AÉREOS (pct)
+// ---------- MEDIOS AÉREOS
 router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, medio_aereo_id } = zod_1.z.object({
@@ -637,6 +872,11 @@ router.patch('/:incendio_uuid/medios-aereos/:medio_aereo_id', auth_1.guardAuth, 
        RETURNING medio_aereo_id`, [String(pct), incendio_uuid, medio_aereo_id]);
         if (!rows.length)
             return res.status(404).json({ code: 'NOT_FOUND' });
+        // Autocompletar llegada de medios aéreos si estaba vacío
+        await data_source_1.AppDataSource.query(`UPDATE cierre_secuencia_control
+       SET llegada_medios_aereos_at = COALESCE(llegada_medios_aereos_at, now()),
+           actualizado_en = now()
+       WHERE incendio_uuid = $1 AND eliminado_en IS NULL`, [incendio_uuid]);
         await data_source_1.AppDataSource.query(`INSERT INTO actualizaciones (incendio_uuid, tipo, descripcion_corta, creado_por)
        VALUES ($1,'CIERRE_ACTUALIZADO','Medio aéreo actualizado',$2)`, [incendio_uuid, user?.usuario_uuid ?? null]);
         res.json({ ok: true });
@@ -672,7 +912,7 @@ router.delete('/:incendio_uuid/medios-aereos/:medio_aereo_id', auth_1.guardAuth,
         next(e);
     }
 });
-// ---------- MEDIOS ACUÁTICOS (cantidad)
+// ---------- MEDIOS ACUÁTICOS
 router.patch('/:incendio_uuid/medios-acuaticos/:medio_acuatico_id', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, medio_acuatico_id } = zod_1.z.object({
@@ -756,7 +996,7 @@ router.delete('/:incendio_uuid/instituciones/:institucion_uuid', auth_1.guardAut
         next(e);
     }
 });
-// ---------- ABASTOS (cantidad)
+// ---------- ABASTOS
 router.patch('/:incendio_uuid/abastos/:abasto_id', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, abasto_id } = zod_1.z.object({
@@ -812,7 +1052,7 @@ router.delete('/:incendio_uuid/abastos/:abasto_id', auth_1.guardAuth, async (req
         next(e);
     }
 });
-// ---------- PROPIEDAD (usado)
+// ---------- PROPIEDAD
 router.patch('/:incendio_uuid/propiedad/:tipo_propiedad_id', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, tipo_propiedad_id } = zod_1.z.object({
@@ -868,7 +1108,7 @@ router.delete('/:incendio_uuid/propiedad/:tipo_propiedad_id', auth_1.guardAuth, 
         next(e);
     }
 });
-// ---------- TÉCNICAS (pct)
+// ---------- TÉCNICAS
 router.patch('/:incendio_uuid/tecnicas/:tecnica', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, tecnica } = zod_1.z.object({
@@ -924,7 +1164,7 @@ router.delete('/:incendio_uuid/tecnicas/:tecnica', auth_1.guardAuth, async (req,
         next(e);
     }
 });
-// ---------- COMPOSICION TIPO (pct)
+// ---------- COMPOSICION TIPO
 router.patch('/:incendio_uuid/composicion-tipo/:tipo_incendio_id', auth_1.guardAuth, async (req, res, next) => {
     try {
         const { incendio_uuid, tipo_incendio_id } = zod_1.z.object({

@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+// config/env.ts
 const zod_1 = require("zod");
 const dotenv_1 = __importDefault(require("dotenv"));
 const dotenv_expand_1 = __importDefault(require("dotenv-expand"));
@@ -34,6 +35,7 @@ const schema = zod_1.z.object({
     RATE_LIMIT_MAX: zod_1.z.coerce.number().int().positive().default(60),
     PAYLOAD_LIMIT_MB: zod_1.z.coerce.number().int().positive().default(10),
     STORAGE_BUCKET_BASE_URL: zod_1.z.string().url().optional(),
+    MEDIA_BASE_URL: zod_1.z.string().url().optional(),
     FIRMS_ENABLED: zod_1.z.coerce.boolean().default(true),
     FIRMS_API_KEY: zod_1.z.string().min(1),
     FIRMS_COUNTRY: zod_1.z.string().min(2).default('GTM'),
@@ -55,8 +57,10 @@ const schema = zod_1.z.object({
     TZ: zod_1.z.string().min(1).default('America/Guatemala'),
 });
 const raw = schema.parse(process.env);
+const DEFAULT_BASE = `http://localhost:${raw.PORT}`;
 const env = {
     ...raw,
+    MEDIA_BASE_URL: raw.MEDIA_BASE_URL ?? DEFAULT_BASE,
     CORS_ALLOWED_ORIGINS_LIST: raw.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean),
 };
 exports.default = env;

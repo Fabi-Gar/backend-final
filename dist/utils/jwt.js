@@ -12,7 +12,7 @@ const env_1 = __importDefault(require("../config/env"));
 const secret = String(env_1.default.JWT_SECRET); // fuerza string, evita overload "none"
 const issuer = env_1.default.JWT_ISSUER || undefined;
 const audience = env_1.default.JWT_AUDIENCE || undefined;
-const expiresIn = env_1.default.JWT_EXPIRES_IN || '2h'; // puede ser string ("2h") o number (3600)
+const expiresIn = env_1.default.JWT_EXPIRES_IN || '90d';
 function signAccessToken(payload) {
     const body = {
         is_admin: payload.is_admin,

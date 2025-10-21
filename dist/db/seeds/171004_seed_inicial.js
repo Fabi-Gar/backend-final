@@ -26,7 +26,8 @@ async function main() {
       INSERT INTO roles (nombre, descripcion) VALUES
       ('ADMIN','Administrador'),
       ('OPERADOR','Operador de campo'),
-      ('ANALISTA','Analista')
+      ('ANALISTA','Analista'),
+      ('USUARIO','Usuario')
       ON CONFLICT (nombre) DO NOTHING;
     `);
         // ===== ESTADOS (códigos usados por los endpoints)

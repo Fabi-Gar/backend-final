@@ -30,6 +30,7 @@ async function authMiddleware(req, res, next) {
     // 🟢 Rutas públicas (no requieren token)
     const publicPaths = new Set([
         '/auth/login',
+        '/auth/register',
         '/health/liveness',
         '/health/readiness',
     ]);
