@@ -96,8 +96,8 @@ app.use(notificacionesRoutes) // GET /api/notificaciones, POST /api/notificacion
 
 // ---------------- Rutas principales ----------------
 app.use('/usuarios', usuariosRoutes)
-app.use('/incendios', seguidoresRoutes)
 app.use('/incendios', incendiosRoutes)
+app.use('/seguidores', seguidoresRoutes)
 app.use('/reportes', fotosReporteRoutes)  // subir/servir fotos
 app.use('/reportes', reportesRoutes)
 app.use('/catalogos', catalogosRoutes)
