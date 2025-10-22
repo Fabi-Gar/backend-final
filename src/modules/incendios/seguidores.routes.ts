@@ -11,43 +11,45 @@ router.get('/mis-seguidos', guardAuth, async (req, res, next) => {
   try {
     const user = res.locals.ctx.user as Usuario
 
+    if (!user || !user.usuario_uuid) {
+      return res.status(401).json({ 
+        ok: false, 
+        error: 'Usuario no autenticado' 
+      })
+    }
+
     const incendios = await AppDataSource.query(
       `SELECT 
-        i.incendio_uuid,
+        s.incendio_uuid,
+        s.creado_en as seguido_desde,
         i.titulo,
         i.descripcion,
-        i.fecha_ocurrencia,
-        i.creado_en,
-        i.actualizado_en,
-        i.foto_portada_url,
-        s.creado_en as seguido_desde,
-        -- Estado del cierre (si existe)
-        COALESCE(
-          (SELECT estado 
-           FROM cierre_catalogos 
-           WHERE incendio_uuid = i.incendio_uuid 
-           AND eliminado_en IS NULL 
-           ORDER BY creado_en DESC 
-           LIMIT 1
-          ), 'Pendiente'
+        i.aprobado,
+        i.creado_en as incendio_creado_en,
+        i.actualizado_en as incendio_actualizado_en,
+        -- Obtener estado de cierre si existe
+        (SELECT estado 
+         FROM cierre_catalogos 
+         WHERE incendio_uuid = s.incendio_uuid 
+         AND eliminado_en IS NULL 
+         ORDER BY creado_en DESC 
+         LIMIT 1
         ) as estado_cierre,
         -- Obtener ubicación del último reporte
-        (SELECT departamento_uuid 
-         FROM reportes 
-         WHERE incendio_uuid = i.incendio_uuid 
-         AND eliminado_en IS NULL 
-         ORDER BY reportado_en DESC NULLS LAST, creado_en DESC 
+        (SELECT json_build_object(
+           'departamento_uuid', r.departamento_uuid,
+           'municipio_uuid', r.municipio_uuid,
+           'latitud', ST_Y(r.ubicacion::geometry),
+           'longitud', ST_X(r.ubicacion::geometry)
+         )
+         FROM reportes r
+         WHERE r.incendio_uuid = s.incendio_uuid 
+         AND r.eliminado_en IS NULL 
+         ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC 
          LIMIT 1
-        ) as departamento_uuid,
-        (SELECT municipio_uuid 
-         FROM reportes 
-         WHERE incendio_uuid = i.incendio_uuid 
-         AND eliminado_en IS NULL 
-         ORDER BY reportado_en DESC NULLS LAST, creado_en DESC 
-         LIMIT 1
-        ) as municipio_uuid
+        ) as ubicacion
        FROM incendio_seguidores s
-       JOIN incendios i ON i.incendio_uuid = s.incendio_uuid
+       INNER JOIN incendios i ON i.incendio_uuid = s.incendio_uuid 
        WHERE s.usuario_uuid = $1 
          AND s.eliminado_en IS NULL
          AND i.eliminado_en IS NULL
@@ -55,12 +57,15 @@ router.get('/mis-seguidos', guardAuth, async (req, res, next) => {
       [user.usuario_uuid]
     )
 
+    console.log('[mis-seguidos] Encontrados:', incendios.length)
+
     res.json({ 
       ok: true, 
       total: incendios.length,
       incendios 
     })
   } catch (err) { 
+    console.error('[mis-seguidos] Error:', err)
     next(err) 
   }
 })
