@@ -7,6 +7,64 @@ import { Usuario } from '../seguridad/entities/usuario.entity'
 
 const router = Router()
 
+router.get('/mis-seguidos', guardAuth, async (req, res, next) => {
+  try {
+    const user = res.locals.ctx.user as Usuario
+
+    const incendios = await AppDataSource.query(
+      `SELECT 
+        i.incendio_uuid,
+        i.titulo,
+        i.descripcion,
+        i.fecha_ocurrencia,
+        i.creado_en,
+        i.actualizado_en,
+        i.foto_portada_url,
+        s.creado_en as seguido_desde,
+        -- Estado del cierre (si existe)
+        COALESCE(
+          (SELECT estado 
+           FROM cierre_catalogos 
+           WHERE incendio_uuid = i.incendio_uuid 
+           AND eliminado_en IS NULL 
+           ORDER BY creado_en DESC 
+           LIMIT 1
+          ), 'Pendiente'
+        ) as estado_cierre,
+        -- Obtener ubicación del último reporte
+        (SELECT departamento_uuid 
+         FROM reportes 
+         WHERE incendio_uuid = i.incendio_uuid 
+         AND eliminado_en IS NULL 
+         ORDER BY reportado_en DESC NULLS LAST, creado_en DESC 
+         LIMIT 1
+        ) as departamento_uuid,
+        (SELECT municipio_uuid 
+         FROM reportes 
+         WHERE incendio_uuid = i.incendio_uuid 
+         AND eliminado_en IS NULL 
+         ORDER BY reportado_en DESC NULLS LAST, creado_en DESC 
+         LIMIT 1
+        ) as municipio_uuid
+       FROM incendio_seguidores s
+       JOIN incendios i ON i.incendio_uuid = s.incendio_uuid
+       WHERE s.usuario_uuid = $1 
+         AND s.eliminado_en IS NULL
+         AND i.eliminado_en IS NULL
+       ORDER BY s.creado_en DESC`,
+      [user.usuario_uuid]
+    )
+
+    res.json({ 
+      ok: true, 
+      total: incendios.length,
+      incendios 
+    })
+  } catch (err) { 
+    next(err) 
+  }
+})
+
 // Seguir un incendio
 router.post('/:incendio_uuid/seguir', guardAuth, async (req, res, next) => {
   try {
