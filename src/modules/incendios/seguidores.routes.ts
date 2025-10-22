@@ -26,28 +26,7 @@ router.get('/mis-seguidos', guardAuth, async (req, res, next) => {
         i.descripcion,
         i.aprobado,
         i.creado_en as incendio_creado_en,
-        i.actualizado_en as incendio_actualizado_en,
-        -- Obtener estado de cierre si existe
-        (SELECT estado 
-         FROM cierre_catalogos 
-         WHERE incendio_uuid = s.incendio_uuid 
-         AND eliminado_en IS NULL 
-         ORDER BY creado_en DESC 
-         LIMIT 1
-        ) as estado_cierre,
-        -- Obtener ubicación del último reporte
-        (SELECT json_build_object(
-           'departamento_uuid', r.departamento_uuid,
-           'municipio_uuid', r.municipio_uuid,
-           'latitud', ST_Y(r.ubicacion::geometry),
-           'longitud', ST_X(r.ubicacion::geometry)
-         )
-         FROM reportes r
-         WHERE r.incendio_uuid = s.incendio_uuid 
-         AND r.eliminado_en IS NULL 
-         ORDER BY r.reportado_en DESC NULLS LAST, r.creado_en DESC 
-         LIMIT 1
-        ) as ubicacion
+        i.actualizado_en as incendio_actualizado_en
        FROM incendio_seguidores s
        INNER JOIN incendios i ON i.incendio_uuid = s.incendio_uuid 
        WHERE s.usuario_uuid = $1 
@@ -65,7 +44,7 @@ router.get('/mis-seguidos', guardAuth, async (req, res, next) => {
       incendios 
     })
   } catch (err) { 
-    console.error('[mis-seguidos] Error:', err)
+    console.error('[mis-seguidos] Error completo:', err)
     next(err) 
   }
 })
