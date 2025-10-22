@@ -1,12 +1,19 @@
 // Helper para obtener usuarios suscritos a un incendio
 import { AppDataSource } from '../../db/data-source'
 
-
 export async function getSubscribedUsers(
   incendio_uuid: string,
   tipoNotificacion: 'avisarmeAprobado' | 'avisarmeActualizaciones' | 'avisarmeCierres'
 ): Promise<string[]> {
   try {
+    const columnMap: Record<string, string> = {
+      avisarmeAprobado: 'avisarme_aprobado',
+      avisarmeActualizaciones: 'avisarme_actualizaciones',
+      avisarmeCierres: 'avisarme_cierres'
+    };
+
+    const columnName = columnMap[tipoNotificacion];
+
     // 1. Obtener departamento y municipio del incendio
     const incendioData = await AppDataSource.query(
       `SELECT r.departamento_uuid, r.municipio_uuid
@@ -29,8 +36,7 @@ export async function getSubscribedUsers(
     const query = `
       SELECT DISTINCT up.user_id as usuario_uuid
       FROM user_push_prefs up
-      WHERE up.eliminado_en IS NULL
-        AND up.${tipoNotificacion} = true
+      WHERE up.${columnName} = true
         AND (
           $1 = ANY(up.departamentos_suscritos)
           OR $2 = ANY(up.municipios_suscritos)

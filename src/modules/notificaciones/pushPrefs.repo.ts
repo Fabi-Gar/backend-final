@@ -122,12 +122,20 @@ export const PushPrefsRepo = {
     return { tokenId: tok.id, active: tok.active };
   },
 
-  // 🆕 Obtener tokens de usuarios específicos CON FILTRO DE PREFERENCIAS
   async getTokensForUserIdsWithPref(
     userIds: string[], 
     prefField: 'avisarmeAprobado' | 'avisarmeActualizaciones' | 'avisarmeCierres'
   ): Promise<string[]> {
     if (!userIds.length) return [];
+    
+    const columnMap: Record<string, string> = {
+      avisarmeAprobado: 'avisarme_aprobado',
+      avisarmeActualizaciones: 'avisarme_actualizaciones',
+      avisarmeCierres: 'avisarme_cierres'
+    };
+    
+    const columnName = columnMap[prefField];
+    
     const rows = await AppDataSource.query(
       `
       SELECT DISTINCT t.token
@@ -135,7 +143,7 @@ export const PushPrefsRepo = {
       JOIN user_push_prefs p ON p.id = t.prefs_id
       WHERE t.active = TRUE
         AND p.user_id = ANY($1::text[])
-        AND p.${prefField} = TRUE
+        AND p.${columnName} = TRUE
       `,
       [userIds]
     );
