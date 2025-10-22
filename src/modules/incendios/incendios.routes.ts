@@ -22,6 +22,8 @@ import path from 'path'
 import mime from 'mime-types'
 import { FotoReporte } from '../../modules/incendios/entities/foto-reporte.entity'
 import { env } from 'process'
+import { PushPrefsRepo } from '../notificaciones/pushPrefs.repo'
+import { sendExpoPush } from '../notificaciones/expoPush.service'
 const router = Router()
 
 
@@ -558,8 +560,23 @@ router.post('/with-reporte',guardAuth,upload.single('file'),
                 incendio_id: result.savedInc.incendio_uuid,
                 creado_por: (user as any).usuario_uuid,
               },
-              leida_en: null,
             })
+          }
+
+          // ✅ NUEVO: Enviar push notification
+          const tokens = await PushPrefsRepo.getTokensForUserIds(adminIds)
+          
+          if (tokens.length > 0) {
+            await sendExpoPush(tokens, {
+              title: '⚠️ Nuevo incendio pendiente',
+              body: `"${result.savedInc.titulo}" requiere aprobación`,
+              data: {
+                tipo: 'incendio_pendiente_aprobacion',
+                incendio_id: result.savedInc.incendio_uuid,
+                deeplink: `/admin/incendios/${result.savedInc.incendio_uuid}`,
+              },
+            })
+            console.log(`📱 Push enviado a ${tokens.length} token(s) de admins`)
           }
 
           console.log(`📢 ${adminIds.length} admin(s) notificados de nuevo incendio: ${result.savedInc.titulo}`)
