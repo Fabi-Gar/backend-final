@@ -7,7 +7,7 @@ import { auditRecord } from '../auditoria/auditoria.service'
 import { notifyIncendioCerrado } from '../notificaciones/incendioNotify.service'
 import { notifyCierreEvento } from '../notificaciones/cierreNotify.service'
 import { Notificacion } from '../notificaciones/entities/notificacion.entity'
-
+import { getSubscribedUsers } from '../incendios/GetsuscribedUsers'
 
 const router = Router()
 // ================== UTIL: validadores simples ==================
@@ -454,35 +454,36 @@ router.patch('/:incendio_uuid/catalogos', guardAuth, async (req, res, next) => {
       })
     }
 
-      if (updatesFeed.length > 0) {
-      try {
-        const incData = await AppDataSource.query(
-          `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
-           FROM incendios i
-           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
-          [incendio_uuid]
-        )
+    if (updatesFeed.length > 0) {
+  try {
+    const incData = await AppDataSource.query(
+      `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+       FROM incendios i
+       WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
+      [incendio_uuid]
+    )
 
-        if (incData?.[0]) {
-          const inc = incData[0]
-          
-          await notifyCierreEvento({
-            type: 'cierre_actualizado',
-            incendio: {
-              id: inc.incendio_uuid,
-              titulo: inc.titulo,
-              creadorUserId: inc.creado_por_uuid,
-              seguidoresUserIds: [], // TODO: Agregar seguidores
-            },
-            autorNombre: res.locals.ctx?.user?.nombre || 'Usuario',
-            resumen: updatesFeed[0], // Primera actualización como resumen
-          })
-        }
+    if (incData?.[0]) {
+      const inc = incData[0]
+      
+      const seguidores = await getSubscribedUsers(incendio_uuid, 'avisarmeActualizaciones')
+      
+      await notifyCierreEvento({
+        type: 'cierre_actualizado',
+        incendio: {
+          id: inc.incendio_uuid,
+          titulo: inc.titulo,
+          creadorUserId: inc.creado_por_uuid,
+          seguidoresUserIds: seguidores, 
+        },
+        autorNombre: res.locals.ctx?.user?.nombre || 'Usuario',
+        resumen: updatesFeed[0],
+      })
+    }
       } catch (notifError) {
         console.error('[notificacion] Error notificando actualización cierre:', notifError)
       }
     }
-
     return res.json({ ok: true })
   } catch (e: any) {
   // Zod / validación
@@ -592,12 +593,16 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
         if (incData?.[0]) {
           const inc = incData[0]
 
+          // ✅ Obtener usuarios suscritos a cierres
+          const seguidoresCierre = await getSubscribedUsers(incendio_uuid, 'avisarmeCierres')
+
+
           // Notificar a creador (y seguidores si los tienes)
           await notifyIncendioCerrado({
             id: inc.incendio_uuid,
             titulo: inc.titulo,
             creadorUserId: inc.creado_por_uuid,
-            seguidoresUserIds: [], // TODO: Agregar seguidores si los tienes
+            seguidoresUserIds: seguidoresCierre, // ✅ Usuarios suscritos a la región
             resumenCierre: 'El incendio ha sido extinguido',
           })
 
@@ -613,6 +618,23 @@ router.post('/:incendio_uuid/finalizar', guardAuth, guardAdmin, async (req, res,
             extinguido_at: finalDate,
           },
         })
+
+          // ✅ Guardar notificación en BD para cada suscriptor
+          for (const suscriptorId of seguidoresCierre) {
+            if (suscriptorId !== inc.creado_por_uuid) { // Evitar duplicado del creador
+              await notiRepo.save({
+                usuario_uuid: suscriptorId,
+                tipo: 'incendio_cerrado',
+                titulo: '🏁 Incendio cerrado en tu región',
+                mensaje: `El incendio "${inc.titulo}" ha sido extinguido`,
+                payload: {
+                  incendio_id: inc.incendio_uuid,
+                  extinguido_at: finalDate,
+                },
+              })
+            }
+          }
+
           // Notificar a la región (municipio)
           const reporteData = await AppDataSource.query(
             `SELECT r.municipio_uuid, m.codigo
@@ -953,12 +975,58 @@ router.post('/init', guardAuth, async (req, res, next) => {
 
       // ✅ NOTIFICAR INICIO DE CIERRE
       try {
-        const incData = await AppDataSource.query(
-          `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
-           FROM incendios i
-           WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
-          [incendio_uuid]
-        )
+  const incData = await AppDataSource.query(
+    `SELECT i.incendio_uuid, i.titulo, i.creado_por_uuid
+     FROM incendios i
+     WHERE i.incendio_uuid = $1 AND i.eliminado_en IS NULL`,
+    [incendio_uuid]
+  )
+
+  if (incData?.[0]) {
+    const inc = incData[0]
+
+    // ✅ Obtener usuarios suscritos a cierres
+    const seguidores = await getSubscribedUsers(incendio_uuid, 'avisarmeCierres')
+
+    await notifyIncendioCerrado({
+      id: inc.incendio_uuid,
+      titulo: inc.titulo,
+      creadorUserId: inc.creado_por_uuid,
+      seguidoresUserIds: seguidores, // ✅ Ahora incluye suscriptores
+      resumenCierre: 'El incendio ha sido extinguido',
+    })
+
+    // ✅ Guardar notificación en BD para el creador
+    const notiRepo = AppDataSource.getRepository(Notificacion)
+    const finalDate = null; // No hay fecha de extinción en el inicio
+    await notiRepo.save({
+      usuario_uuid: inc.creado_por_uuid,
+      tipo: 'incendio_cerrado',
+      titulo: '🏁 Incendio cerrado',
+      mensaje: `El incendio "${inc.titulo}" ha sido extinguido`,
+      payload: {
+        incendio_id: inc.incendio_uuid,
+        extinguido_at: finalDate,
+      },
+    })
+
+    // ✅ OPCIONAL: También guardar notificación para cada suscriptor
+    for (const suscriptorId of seguidores) {
+      if (suscriptorId !== inc.creado_por_uuid) { // Evitar duplicado del creador
+        await notiRepo.save({
+          usuario_uuid: suscriptorId,
+          tipo: 'incendio_cerrado',
+          titulo: '🏁 Incendio cerrado en tu región',
+          mensaje: `El incendio "${inc.titulo}" ha sido extinguido`,
+          payload: {
+            incendio_id: inc.incendio_uuid,
+            extinguido_at: finalDate,
+          },
+        })
+      }
+    }
+  }
+
 
         if (incData?.[0]) {
           const inc = incData[0]
@@ -987,7 +1055,7 @@ router.post('/init', guardAuth, async (req, res, next) => {
           })
         }
       } catch (notifError) {
-        console.error('[notificacion] Error notificando inicio cierre:', notifError)
+        console.error('[notificacion] Error notificando cierre:', notifError)
       }
     }
 
