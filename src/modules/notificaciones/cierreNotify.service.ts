@@ -1,6 +1,6 @@
-// src/services/cierreNotify.service.ts
+// src/modules/notificaciones/cierreNotify.service.ts
 import { PushPrefsRepo } from './pushPrefs.repo';
-import { sendExpoPush } from './expoPush.service';
+import { sendFCMPush } from './fcmPush.service';
 import type { CierreUpdateType } from './push.types';
 
 async function tokensParaCierre(
@@ -11,11 +11,17 @@ async function tokensParaCierre(
   if (primerReportanteUserId) userIds.add(String(primerReportanteUserId));
   (incendio.seguidoresUserIds || []).forEach(u => userIds.add(String(u)));
   
+  console.log('[tokensParaCierre] Buscando tokens para usuarios:', Array.from(userIds));
+  
   // ✅ Filtrar tokens de usuarios que quieren recibir notificaciones de cierre
-  return await PushPrefsRepo.getTokensForUserIdsWithPref(
+  const tokens = await PushPrefsRepo.getTokensForUserIdsWithPref(
     Array.from(userIds),
     'avisarmeCierres'
   );
+  
+  console.log('[tokensParaCierre] Tokens encontrados:', tokens.length);
+  
+  return tokens;
 }
 
 export async function notifyCierreEvento(params: {
@@ -32,7 +38,13 @@ export async function notifyCierreEvento(params: {
 }) {
   const { type, incendio, autorNombre, resumen, primerReportanteUserId } = params;
 
+  console.log('[notifyCierreEvento] Iniciando notificación de cierre');
+  console.log('  Tipo:', type);
+  console.log('  Incendio ID:', incendio.id);
+  console.log('  Seguidores:', incendio.seguidoresUserIds?.length || 0);
+
   const tokens = await tokensParaCierre(incendio, primerReportanteUserId);
+  
   if (!tokens.length) {
     console.log('⏭️ No hay tokens activos para notificar evento de cierre');
     return;
@@ -51,7 +63,12 @@ export async function notifyCierreEvento(params: {
     resumen ? `• ${resumen}` : null,
   ].filter(Boolean).join(' ');
 
-  await sendExpoPush(tokens, {
+  console.log(`📤 Enviando notificación a ${tokens.length} dispositivo(s)`);
+  console.log('  Título:', titles[type]);
+  console.log('  Cuerpo:', body);
+
+  // ✅ Usar FCM en lugar de Expo
+  await sendFCMPush(tokens, {
     title: titles[type],
     body,
     data: {
@@ -60,18 +77,26 @@ export async function notifyCierreEvento(params: {
       deeplink: `/incendios/detalles?id=${incendio.id}`,
     },
   });
+
+  console.log('✅ Notificaciones enviadas correctamente');
 }
 
 export async function notifyCierreFinalizadoARegion(params: {
   incendio: { id: string | number; titulo?: string; regionCode: string };
 }) {
+  console.log('[notifyCierreFinalizadoARegion] Notificando a región:', params.incendio.regionCode);
+  
   const tokens = await PushPrefsRepo.getTokensByRegion(params.incendio.regionCode);
+  
   if (!tokens.length) {
     console.log('⏭️ No hay tokens suscritos a la región');
     return;
   }
   
-  await sendExpoPush(tokens, {
+  console.log(`📤 Enviando notificación regional a ${tokens.length} dispositivo(s)`);
+  
+  // ✅ Usar FCM en lugar de Expo
+  await sendFCMPush(tokens, {
     title: '✅ Incendio finalizado en tu zona',
     body: params.incendio.titulo || 'Toca para ver detalles',
     data: {
@@ -81,4 +106,6 @@ export async function notifyCierreFinalizadoARegion(params: {
       deeplink: `/incendios/detalles?id=${params.incendio.id}`,
     },
   });
+
+  console.log('✅ Notificación regional enviada');
 }
