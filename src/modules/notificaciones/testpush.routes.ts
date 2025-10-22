@@ -1,12 +1,12 @@
 // src/modules/notificaciones/testpush.routes.ts
 import { Router } from 'express';
-import { sendExpoPush } from './expoPush.service';
+import { sendFCMPush } from './fcmPush.service';
 import { PushPrefsRepo } from './pushPrefs.repo';
 import { guardAuth } from '../../middlewares/auth';
 
 const router = Router();
 
-// 🧪 Ruta 1: Test simple con token manual
+// 🧪 Ruta 1: Test simple con token manual (ahora FCM)
 router.post('/test-push', async (req, res) => {
   try {
     const { token, title, body } = req.body;
@@ -18,11 +18,11 @@ router.post('/test-push', async (req, res) => {
       });
     }
 
-    console.log('📤 Enviando notificación de prueba a:', token);
+    console.log('📤 Enviando notificación FCM de prueba a:', token.substring(0, 30) + '...');
 
-    await sendExpoPush([token], {
-      title: title || '🔥 Notificación de prueba',
-      body: body || 'Si ves esto, Expo Push funciona correctamente',
+    await sendFCMPush([token], {
+      title: title || '🔥 Notificación de prueba FCM',
+      body: body || 'Si ves esto, Firebase Cloud Messaging funciona correctamente',
       data: { 
         test: 'ok',
         timestamp: new Date().toISOString(),
@@ -32,7 +32,7 @@ router.post('/test-push', async (req, res) => {
 
     res.json({ 
       ok: true, 
-      message: 'Notificación enviada exitosamente',
+      message: 'Notificación FCM enviada exitosamente',
       sent_to: token.substring(0, 30) + '...',
     });
   } catch (e: any) {
@@ -56,14 +56,14 @@ router.post('/test-push-me', guardAuth, async (req, res) => {
       });
     }
 
-    console.log('📤 Buscando tokens del usuario:', userId);
+    console.log('📤 Buscando tokens FCM del usuario:', userId);
 
     const prefs = await PushPrefsRepo.getByUserId(userId);
     
     if (!prefs || !prefs.tokens || prefs.tokens.length === 0) {
       return res.status(404).json({ 
         ok: false, 
-        error: 'No tienes tokens registrados. Registra tu dispositivo primero.' 
+        error: 'No tienes tokens FCM registrados. Registra tu dispositivo primero.' 
       });
     }
 
@@ -78,11 +78,11 @@ router.post('/test-push-me', guardAuth, async (req, res) => {
       });
     }
 
-    console.log(`📤 Enviando notificación a ${activeTokens.length} dispositivo(s)`);
+    console.log(`📤 Enviando notificación FCM a ${activeTokens.length} dispositivo(s)`);
 
-    await sendExpoPush(activeTokens, {
+    await sendFCMPush(activeTokens, {
       title: '🎉 Test de notificación personal',
-      body: 'Tus notificaciones están funcionando correctamente',
+      body: 'Tus notificaciones FCM están funcionando correctamente',
       data: { 
         test: 'ok',
         user_id: userId,
@@ -92,7 +92,7 @@ router.post('/test-push-me', guardAuth, async (req, res) => {
 
     res.json({ 
       ok: true, 
-      message: `Notificación enviada a ${activeTokens.length} dispositivo(s)`,
+      message: `Notificación FCM enviada a ${activeTokens.length} dispositivo(s)`,
       devices: activeTokens.length,
     });
   } catch (e: any) {
@@ -134,11 +134,11 @@ router.post('/test-push-region', async (req, res) => {
       });
     }
 
-    console.log(`📤 Enviando notificación a ${tokens.length} usuario(s) en ${locationName}`);
+    console.log(`📤 Enviando notificación FCM a ${tokens.length} usuario(s) en ${locationName}`);
 
-    await sendExpoPush(tokens, {
+    await sendFCMPush(tokens, {
       title: '🔥 Alerta de prueba regional',
-      body: `Test de notificación para ${locationName}`,
+      body: `Test de notificación FCM para ${locationName}`,
       data: { 
         test: 'ok',
         region: municipioCode || departamentoCode,
@@ -148,7 +148,7 @@ router.post('/test-push-region', async (req, res) => {
 
     res.json({ 
       ok: true, 
-      message: `Notificación enviada a ${tokens.length} usuario(s)`,
+      message: `Notificación FCM enviada a ${tokens.length} usuario(s)`,
       region: locationName,
       recipients: tokens.length,
     });
@@ -186,6 +186,7 @@ router.get('/my-push-config', guardAuth, async (req, res) => {
       .filter(t => t.active)
       .map(t => ({
         token: t.token.substring(0, 30) + '...',
+        tipo: t.token.startsWith('ExponentPushToken') ? 'Expo (obsoleto)' : 'FCM',
         created: t.createdAt,
       }));
 
@@ -211,7 +212,7 @@ router.get('/my-push-config', guardAuth, async (req, res) => {
   }
 });
 
-// ✅ NUEVO: Limpiar tokens antiguos de Expo
+// ✅ Limpiar tokens antiguos de Expo
 router.delete('/clean-expo-tokens', guardAuth, async (req, res) => {
   try {
     const userId = res.locals?.ctx?.user?.usuario_uuid;
@@ -248,7 +249,7 @@ router.delete('/clean-expo-tokens', guardAuth, async (req, res) => {
   }
 });
 
-// ✅ NUEVO: Eliminar TODOS mis tokens
+// ✅ Eliminar TODOS mis tokens
 router.delete('/clean-all-tokens', guardAuth, async (req, res) => {
   try {
     const userId = res.locals?.ctx?.user?.usuario_uuid;
@@ -283,7 +284,7 @@ router.delete('/clean-all-tokens', guardAuth, async (req, res) => {
   }
 });
 
-// ✅ NUEVO: Re-registrar mi token FCM actual
+// ✅ Re-registrar mi token FCM actual
 router.post('/reregister-token', guardAuth, async (req, res) => {
   try {
     const userId = res.locals?.ctx?.user?.usuario_uuid;
@@ -312,7 +313,7 @@ router.post('/reregister-token', guardAuth, async (req, res) => {
     const { PushService } = await import('./push.service');
     await PushService.register({
       userId,
-      expoPushToken: fcmToken,
+      expoPushToken: fcmToken, // Backend lo espera con este nombre
       avisarmeAprobado: true,
       avisarmeActualizaciones: true,
       avisarmeCierres: true,
@@ -330,7 +331,7 @@ router.post('/reregister-token', guardAuth, async (req, res) => {
   }
 });
 
-// ✅ NUEVO: Ver mis tokens actuales
+// ✅ Ver mis tokens actuales
 router.get('/my-tokens', guardAuth, async (req, res) => {
   try {
     const userId = res.locals?.ctx?.user?.usuario_uuid;
@@ -380,6 +381,5 @@ router.get('/my-tokens', guardAuth, async (req, res) => {
     res.status(500).json({ ok: false, error: e?.message });
   }
 });
-
 
 export default router;
